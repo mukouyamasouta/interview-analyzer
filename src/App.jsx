@@ -1230,6 +1230,7 @@ export default function App() {
       } catch {}
 
       try {
+      const { mode, file, text, company, iType } = args; // ← 引数を展開
       // STEP 1: get transcript
       if (mode === "audio") {
         const INLINE_LIMIT = 19 * 1024 * 1024;
