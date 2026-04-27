@@ -470,6 +470,13 @@ const SettingsModal = ({ open, onClose, apiKey, setApiKey, model, setModel }) =>
 
 // ── Loading Overlay ───────────────────────────────────────────────────────
 const LoadingOverlay = ({ stage, uploadPct }) => {
+  const [isHidden, setIsHidden] = useState(false);
+  useEffect(() => {
+    const onVis = () => setIsHidden(document.hidden);
+    document.addEventListener('visibilitychange', onVis);
+    return () => document.removeEventListener('visibilitychange', onVis);
+  }, []);
+
   const stages = {
     upload: uploadPct != null ? `音声をアップロード中... ${uploadPct}%` : "音声をアップロード中...",
     transcribe: "音声を文字起こし中...",
@@ -478,7 +485,7 @@ const LoadingOverlay = ({ stage, uploadPct }) => {
   };
   return (
     <div style={{ position:"fixed",inset:0,zIndex:40,background:"rgba(245,241,234,0.92)",backdropFilter:"blur(4px)",display:"flex",alignItems:"center",justifyContent:"center",fontFamily:F.sans }}>
-      <div style={{ textAlign:"center" }}>
+      <div style={{ textAlign:"center",maxWidth:440,padding:"0 24px" }}>
         <div style={{ position:"relative",width:80,height:80,margin:"0 auto 24px" }}>
           <svg width="80" height="80" viewBox="0 0 80 80" style={{ animation:"spin 2s linear infinite" }}>
             <circle cx="40" cy="40" r="34" fill="none" stroke={C.tan} strokeWidth="3"/>
@@ -487,12 +494,24 @@ const LoadingOverlay = ({ stage, uploadPct }) => {
           </svg>
         </div>
         <p style={{ fontFamily:F.min,fontSize:"1.1rem",color:C.ink,marginBottom:6 }}>{stages[stage]||"処理中..."}</p>
-        <p style={{ fontSize:"12px",color:C.ink60 }}>少々お待ちください</p>
+        <p style={{ fontSize:"12px",color:C.ink60,marginBottom:16 }}>少々お待ちください</p>
+        {isHidden ? (
+          <div style={{ padding:"12px 16px",background:C.amber10,border:`1px solid rgba(193,154,75,0.4)` }}>
+            <p style={{ fontSize:"12px",color:C.amberT,margin:0,lineHeight:1.7 }}>
+              ⚠️ 別タブで開きましたが<strong>分析は継続中</strong>です。このタブを閉じないでください。
+            </p>
+          </div>
+        ) : (
+          <div style={{ padding:"10px 16px",background:C.koke10,border:`1px solid ${C.koke30}` }}>
+            <p style={{ fontSize:"11px",color:C.koke2,margin:0 }}>✓ 別タブに移動しても分析は継続されます</p>
+          </div>
+        )}
         <style>{`@keyframes spin { from{transform:rotate(0deg);} to{transform:rotate(360deg);} }`}</style>
       </div>
     </div>
   );
 };
+
 
 
 // ── Input Tab ─────────────────────────────────────────────────────────────
@@ -1195,14 +1214,22 @@ export default function App() {
 
   const hasKey = apiKey.trim().length>0;
 
-  const runAnalysis = async ({ mode, file, text, company, iType }) => {
-    setError(""); setSaved(false);
-    const sessionId = `s-${Date.now()}-${Math.random().toString(36).slice(2,7)}`;
-    const date = new Date().toISOString().slice(0,10).replace(/-/g,"/");
-    let transcript = [];
-    let plainText = "";
+  // Acquire a Web Lock to prevent browser from freezing this page in background tabs
+  const runAnalysis = (args) => {
+    const doRun = async () => {
+      setError(""); setSaved(false);
+      const sessionId = `s-${Date.now()}-${Math.random().toString(36).slice(2,7)}`;
+      const date = new Date().toISOString().slice(0,10).replace(/-/g,"/");
+      let transcript = [];
+      let plainText = "";
 
-    try {
+      // Acquire Wake Lock to prevent screen/system sleep (best effort)
+      let wakeLock = null;
+      try {
+        if ('wakeLock' in navigator) wakeLock = await navigator.wakeLock.request('screen');
+      } catch {}
+
+      try {
       // STEP 1: get transcript
       if (mode === "audio") {
         const INLINE_LIMIT = 19 * 1024 * 1024;
@@ -1305,7 +1332,16 @@ export default function App() {
       console.error(e);
       setError(e.message || "分析に失敗しました");
       setBusy(null);
+    } finally {
+      try { if (wakeLock) await wakeLock.release(); } catch {}
     }
+  };
+
+  // Web Locks API: prevents browser from freezing this tab in the background
+  if ('locks' in navigator) {
+    return navigator.locks.request('interview-analysis', { mode: 'exclusive' }, doRun);
+  }
+  return doRun();
   };
 
   const saveSession = async () => {
