@@ -75,25 +75,42 @@ function safeJsonParse(text) {
   return null;
 }
 
-// ── Gemini API ────────────────────────────────────────────────────────────
-async function geminiText({ apiKey, model, prompt, json=false, maxTokens=8192 }) {
-  const url=`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(apiKey)}`;
-  const body = {
-    contents:[{ parts:[{ text:prompt }] }],
-    generationConfig:{ maxOutputTokens:maxTokens, temperature:0.3, ...(json?{ responseMimeType:"application/json" }:{}) },
-  };
-  const res=await fetch(url,{ method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(body) });
-  const data=await res.json();
-  if(!res.ok) throw new Error(data?.error?.message||`HTTP ${res.status}`);
-  const text=data?.candidates?.[0]?.content?.parts?.[0]?.text||"";
-  if(json){
-    const parsed = safeJsonParse(text);
-    if (parsed === null) throw new Error(`JSONの解析に失敗しました。モデルの出力: ${text.slice(0,300)}...`);
-    return parsed;
+// ── Retry utility (handles Gemini overload / rate-limit errors) ───────────────
+const RETRYABLE = /high demand|overloaded|quota|rate.?limit|503|429|temporarily/i;
+async function withRetry(fn, { maxRetries=3, onRetry } = {}) {
+  const delays = [5000, 15000, 30000];
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      return await fn();
+    } catch (e) {
+      if (attempt >= maxRetries || !RETRYABLE.test(e.message)) throw e;
+      const wait = delays[attempt] ?? 30000;
+      onRetry?.(attempt + 1, wait);
+      await new Promise(r => setTimeout(r, wait));
+    }
   }
-  return text;
 }
 
+// ── Gemini API ─────────────────────────────────────────────────────────────
+async function geminiText({ apiKey, model, prompt, json=false, maxTokens=8192, onRetry }) {
+  return withRetry(async () => {
+    const url=`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(apiKey)}`;
+    const body = {
+      contents:[{ parts:[{ text:prompt }] }],
+      generationConfig:{ maxOutputTokens:maxTokens, temperature:0.3, ...(json?{ responseMimeType:"application/json" }:{}) },
+    };
+    const res=await fetch(url,{ method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(body) });
+    const data=await res.json();
+    if(!res.ok) throw new Error(data?.error?.message||`HTTP ${res.status}`);
+    const text=data?.candidates?.[0]?.content?.parts?.[0]?.text||"";
+    if(json){
+      const parsed = safeJsonParse(text);
+      if (parsed === null) throw new Error(`JSONの解析に失敗しました。モデルの出力: ${text.slice(0,300)}...`);
+      return parsed;
+    }
+    return text;
+  }, { onRetry });
+}
 
 // Upload a file to Gemini File API (for files > 20MB)
 async function uploadToFileAPI(apiKey, file, onProgress) {
@@ -132,7 +149,7 @@ async function uploadToFileAPI(apiKey, file, onProgress) {
   return data.file; // { uri, mimeType, name, ... }
 }
 
-async function geminiAudio({ apiKey, model, file, fileUri, mimeTypeOverride, prompt, maxTokens=65536, onUploadProgress }) {
+async function geminiAudio({ apiKey, model, file, fileUri, mimeTypeOverride, prompt, maxTokens=65536, onUploadProgress, onRetry }) {
   const mimeType = mimeTypeOverride || resolvedMime(file);
   const INLINE_LIMIT = 19 * 1024 * 1024;
 
@@ -156,22 +173,23 @@ async function geminiAudio({ apiKey, model, file, fileUri, mimeTypeOverride, pro
       audioPart = { file_data: { mime_type: mimeType, file_uri: resolvedFileUri } };
     }
   } else if (resolvedFileUri) {
-    // Reuse already-uploaded file (continuation pass)
     audioPart = { file_data: { mime_type: mimeType, file_uri: resolvedFileUri } };
   }
 
-  const body = {
-    contents: [{ parts: [audioPart, { text: prompt }] }],
-    generationConfig: { maxOutputTokens: maxTokens, temperature: 0.1 },
-  };
-  const res = await fetch(generateUrl, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
-  const data = await res.json();
-  if (!res.ok) throw new Error(data?.error?.message || `HTTP ${res.status}`);
-  return {
-    text: data?.candidates?.[0]?.content?.parts?.[0]?.text || "",
-    fileUri: resolvedFileUri,
-    finishReason: data?.candidates?.[0]?.finishReason || "",
-  };
+  return withRetry(async () => {
+    const body = {
+      contents: [{ parts: [audioPart, { text: prompt }] }],
+      generationConfig: { maxOutputTokens: maxTokens, temperature: 0.1 },
+    };
+    const res = await fetch(generateUrl, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data?.error?.message || `HTTP ${res.status}`);
+    return {
+      text: data?.candidates?.[0]?.content?.parts?.[0]?.text || "",
+      fileUri: resolvedFileUri,
+      finishReason: data?.candidates?.[0]?.finishReason || "",
+    };
+  }, { onRetry });
 }
 
 // ── Prompts ───────────────────────────────────────────────────────────────
@@ -469,7 +487,7 @@ const SettingsModal = ({ open, onClose, apiKey, setApiKey, model, setModel }) =>
 };
 
 // ── Loading Overlay ───────────────────────────────────────────────────────
-const LoadingOverlay = ({ stage, uploadPct }) => {
+const LoadingOverlay = ({ stage, uploadPct, retryInfo }) => {
   const [isHidden, setIsHidden] = useState(false);
   useEffect(() => {
     const onVis = () => setIsHidden(document.hidden);
@@ -494,7 +512,16 @@ const LoadingOverlay = ({ stage, uploadPct }) => {
           </svg>
         </div>
         <p style={{ fontFamily:F.min,fontSize:"1.1rem",color:C.ink,marginBottom:6 }}>{stages[stage]||"処理中..."}</p>
-        <p style={{ fontSize:"12px",color:C.ink60,marginBottom:16 }}>少々お待ちください</p>
+        {retryInfo ? (
+          <div style={{ padding:"12px 16px",background:C.amber10,border:`1px solid rgba(193,154,75,0.4)`,marginBottom:16 }}>
+            <p style={{ fontSize:"12px",color:C.amberT,margin:0,lineHeight:1.7 }}>
+              ⚠️ APIが混雑中です。{Math.round(retryInfo.waitMs/1000)}秒待って再試行しています。
+              <br/><span style={{ fontSize:"11px",opacity:0.8 }}>({retryInfo.attempt}/3回目)</span>
+            </p>
+          </div>
+        ) : (
+          <p style={{ fontSize:"12px",color:C.ink60,marginBottom:16 }}>少々お待ちください</p>
+        )}
         {isHidden ? (
           <div style={{ padding:"12px 16px",background:C.amber10,border:`1px solid rgba(193,154,75,0.4)` }}>
             <p style={{ fontSize:"12px",color:C.amberT,margin:0,lineHeight:1.7 }}>
@@ -1151,6 +1178,7 @@ export default function App() {
   const [error, setError] = useState("");
   const [saved, setSaved] = useState(false);
   const [history, setHistory] = useState([]);
+  const [retryInfo, setRetryInfo] = useState(null);
 
   useEffect(()=>{
     (async()=>{
@@ -1217,7 +1245,7 @@ export default function App() {
   // Acquire a Web Lock to prevent browser from freezing this page in background tabs
   const runAnalysis = (args) => {
     const doRun = async () => {
-      setError(""); setSaved(false);
+      setError(""); setSaved(false); setRetryInfo(null);
       const sessionId = `s-${Date.now()}-${Math.random().toString(36).slice(2,7)}`;
       const date = new Date().toISOString().slice(0,10).replace(/-/g,"/");
       let transcript = [];
@@ -1250,7 +1278,9 @@ export default function App() {
               setUploadPct(pct);
               if (pct >= 80) { setBusy("transcribe"); setUploadPct(null); }
             },
+            onRetry: (attempt, waitMs) => { setBusy("transcribe"); setRetryInfo({ attempt, waitMs }); }
           });
+          setRetryInfo(null);
           setBusy("transcribe");
           transcript = parseTranscriptText(pass1.text);
 
@@ -1270,7 +1300,9 @@ export default function App() {
               mimeTypeOverride: resolvedMime(file),
               prompt: makeContinuePrompt(lastTime),
               maxTokens: 65536,
+              onRetry: (attempt, waitMs) => { setBusy("transcribe"); setRetryInfo({ attempt, waitMs }); }
             });
+            setRetryInfo(null);
             const extra = parseTranscriptText(pass2.text);
             // Merge, deduplicating any overlap at the seam
             if (extra.length > 0) {
@@ -1308,7 +1340,9 @@ export default function App() {
       try {
         const qaResult = await geminiText({
           apiKey, model, prompt: QA_PROMPT(plainText, company, iType), json: true, maxTokens: 8192,
+          onRetry: (attempt, waitMs) => { setBusy("qa"); setRetryInfo({ attempt, waitMs }); }
         });
+        setRetryInfo(null);
         qaList = qaResult?.qaList || [];
       } catch (e) {
         console.warn("Q&A extraction failed, continuing:", e.message);
@@ -1323,7 +1357,9 @@ export default function App() {
       setBusy("feedback");
       const fbResult = await geminiText({
         apiKey, model, prompt: FEEDBACK_PROMPT(qaList.length > 0 ? qaList : plainText, company, iType), json: true, maxTokens: 8192,
+        onRetry: (attempt, waitMs) => { setBusy("feedback"); setRetryInfo({ attempt, waitMs }); }
       });
+      setRetryInfo(null);
       const fullSession = { sessionId, company, iType, date, transcript, qaList, feedback: fbResult };
       setSession(fullSession);
       await persistCurrent(fullSession);
@@ -1333,6 +1369,7 @@ export default function App() {
       console.error(e);
       setError(e.message || "分析に失敗しました");
       setBusy(null);
+      setRetryInfo(null);
     } finally {
       try { if (wakeLock) await wakeLock.release(); } catch {}
     }
@@ -1498,7 +1535,7 @@ export default function App() {
         </div>
       </footer>
 
-      {busy && <LoadingOverlay stage={busy} uploadPct={uploadPct}/>}
+      {busy && <LoadingOverlay stage={busy} uploadPct={uploadPct} retryInfo={retryInfo}/>}
 
       <SettingsModal open={settingsOpen} onClose={()=>setSettingsOpen(false)}
         apiKey={apiKey} setApiKey={setApiKey} model={model} setModel={setModel}/>
