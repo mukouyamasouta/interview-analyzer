@@ -132,51 +132,88 @@ async function uploadToFileAPI(apiKey, file, onProgress) {
   return data.file; // { uri, mimeType, name, ... }
 }
 
-async function geminiAudio({ apiKey, model, file, prompt, maxTokens=8192, onUploadProgress }) {
-  const mimeType = resolvedMime(file);
-  const INLINE_LIMIT = 19 * 1024 * 1024; // 19MB — stay safely under 20MB inline limit
+async function geminiAudio({ apiKey, model, file, fileUri, mimeTypeOverride, prompt, maxTokens=65536, onUploadProgress }) {
+  const mimeType = mimeTypeOverride || resolvedMime(file);
+  const INLINE_LIMIT = 19 * 1024 * 1024;
 
   const generateUrl = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(apiKey)}`;
 
   let audioPart;
-  if (file.size <= INLINE_LIMIT) {
-    // Small file: base64 inline
-    const b64 = await new Promise((res, rej) => {
-      const r = new FileReader();
-      r.onload = () => res(r.result.split(",")[1]);
-      r.onerror = () => rej(new Error("ファイル読み込みに失敗しました"));
-      r.readAsDataURL(file);
-    });
-    audioPart = { inline_data: { mime_type: mimeType, data: b64 } };
-  } else {
-    // Large file: use Gemini File API
-    const uploaded = await uploadToFileAPI(apiKey, file, onUploadProgress);
-    audioPart = { file_data: { mime_type: mimeType, file_uri: uploaded.uri } };
+  let resolvedFileUri = fileUri || null;
+
+  if (file && !resolvedFileUri) {
+    if (file.size <= INLINE_LIMIT) {
+      const b64 = await new Promise((res, rej) => {
+        const r = new FileReader();
+        r.onload = () => res(r.result.split(",")[1]);
+        r.onerror = () => rej(new Error("ファイル読み込みに失敗しました"));
+        r.readAsDataURL(file);
+      });
+      audioPart = { inline_data: { mime_type: mimeType, data: b64 } };
+    } else {
+      const uploaded = await uploadToFileAPI(apiKey, file, onUploadProgress);
+      resolvedFileUri = uploaded.uri;
+      audioPart = { file_data: { mime_type: mimeType, file_uri: resolvedFileUri } };
+    }
+  } else if (resolvedFileUri) {
+    // Reuse already-uploaded file (continuation pass)
+    audioPart = { file_data: { mime_type: mimeType, file_uri: resolvedFileUri } };
   }
 
   const body = {
     contents: [{ parts: [audioPart, { text: prompt }] }],
-    generationConfig: { maxOutputTokens: maxTokens, temperature: 0.2 },
+    generationConfig: { maxOutputTokens: maxTokens, temperature: 0.1 },
   };
   const res = await fetch(generateUrl, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
   const data = await res.json();
   if (!res.ok) throw new Error(data?.error?.message || `HTTP ${res.status}`);
-  return data?.candidates?.[0]?.content?.parts?.[0]?.text || "";
+  return {
+    text: data?.candidates?.[0]?.content?.parts?.[0]?.text || "",
+    fileUri: resolvedFileUri,
+    finishReason: data?.candidates?.[0]?.finishReason || "",
+  };
 }
 
 // ── Prompts ───────────────────────────────────────────────────────────────
 // Transcription uses PLAIN TEXT (not JSON) to avoid truncation for long interviews
-const TRANSCRIBE_PROMPT = `この音声は日本語の面接です。発話を全て聞き取り、以下のフォーマットで出力してください。
+const TRANSCRIBE_PROMPT = `この音声は日本語の面接です。音声の最初から最後まで、全ての発話を一切省略せずに以下のフォーマットで書き起こしてください。
 
 《出力フォーマット》— 一行一発話、前置き・コードブロック不要:
 [面接官 MM:SS] 発話内容
 [志望者 MM:SS] 発話内容
 
-ルール:
-- フィラー（「えーと」「あの」等）も省略せずかく
+【重要ルール】:
+- 音声の最初から最後まで全てを書き起こす。途中で終わったり要約したりしないこと
+- フィラー（「えーと」「あの」等）も省略せず正確に書く
 - 沈黙は無視
 - 質問・問いかけが面接官、回答が志望者
-- JSONやマークダウン等の予備項目不要`;
+- JSON・マークダウン・説明文不要。フォーマット通りの行のみを出力`;
+
+// Continuation prompt for when the first pass was cut short
+const makeContinuePrompt = (lastTime) =>
+  `この音声ファイルの ${lastTime} 以降の発話を全て最後まで以下のフォーマットで書き起こしてください。先に出力した部分は繰り返さないこと。
+
+[面接官 MM:SS] 発話内容
+[志望者 MM:SS] 発話内容
+
+- ${lastTime} より後の発話のみを出力する
+- 音声の最後まで全て書き起こす。途中で止めないこと
+- JSON・マークダウン・説明文不要`;
+
+// Estimate audio duration from file size (rough: compressed audio ~1.5MB/min)
+function estimateAudioMinutes(file) {
+  const ext = file.name.split('.').pop().toLowerCase();
+  const mbPerMin = ['wav', 'aiff', 'aif'].includes(ext) ? 10 : 1.5;
+  return file.size / (mbPerMin * 1024 * 1024);
+}
+
+// Parse MM:SS or H:MM:SS string to total seconds
+function timeToSeconds(t) {
+  if (!t) return 0;
+  const parts = t.split(':').map(Number);
+  if (parts.length === 3) return parts[0]*3600 + parts[1]*60 + parts[2];
+  return (parts[0]||0)*60 + (parts[1]||0);
+}
 
 // Parse the plain-text transcript response into structured objects
 function parseTranscriptText(rawText) {
@@ -1176,18 +1213,47 @@ export default function App() {
           setBusy("transcribe");
         }
         try {
-          const result = await geminiAudio({
-            apiKey, model, file, prompt: TRANSCRIBE_PROMPT, maxTokens: 32768,
+          // First transcription pass
+          const pass1 = await geminiAudio({
+            apiKey, model, file,
+            prompt: TRANSCRIBE_PROMPT,
+            maxTokens: 65536,
             onUploadProgress: (pct) => {
               setUploadPct(pct);
               if (pct >= 80) { setBusy("transcribe"); setUploadPct(null); }
             },
           });
-          // Parse plain-text format [面接官 MM:SS] / [志望者 MM:SS]
-          transcript = parseTranscriptText(result);
+          setBusy("transcribe");
+          transcript = parseTranscriptText(pass1.text);
+
+          // Continuation: check if we got the full audio
+          const estimatedMin = estimateAudioMinutes(file);
+          const lastEntry = transcript[transcript.length - 1];
+          const lastSec = timeToSeconds(lastEntry?.time || "0:00");
+          const coverageRatio = estimatedMin > 0 ? lastSec / (estimatedMin * 60) : 1;
+
+          // If we covered less than 75% of estimated duration, request continuation
+          if (pass1.fileUri && coverageRatio < 0.75 && lastEntry?.time) {
+            setBusy("transcribe"); // keep transcribing indicator
+            const lastTime = lastEntry.time;
+            const pass2 = await geminiAudio({
+              apiKey, model,
+              fileUri: pass1.fileUri,
+              mimeTypeOverride: resolvedMime(file),
+              prompt: makeContinuePrompt(lastTime),
+              maxTokens: 65536,
+            });
+            const extra = parseTranscriptText(pass2.text);
+            // Merge, deduplicating any overlap at the seam
+            if (extra.length > 0) {
+              const lastTranscriptTime = lastEntry.time;
+              const filtered = extra.filter(e => !e.time || timeToSeconds(e.time) > timeToSeconds(lastTranscriptTime) - 5);
+              transcript = [...transcript, ...filtered];
+            }
+          }
+
           if (transcript.length === 0) {
-            // Fallback: treat whole response as single block
-            transcript = [{ speaker: "unknown", text: result, time: "00:00" }];
+            transcript = [{ speaker: "unknown", text: pass1.text, time: "00:00" }];
           }
           plainText = transcript.map(e => `[${e.speaker==="interviewer"?"面接官":e.speaker==="candidate"?"志望者":"話者"}]${e.time?` ${e.time}`:""} ${e.text}`).join("\n");
         } catch (e) {
