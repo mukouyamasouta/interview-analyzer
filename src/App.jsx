@@ -785,11 +785,18 @@ const InputTab = ({ onAnalyze, hasKey, onOpenSettings, busy }) => {
         </div>
         <div>
           <label style={{ display:"block",fontSize:"11px",letterSpacing:"0.25em",color:C.ink60,marginBottom:"8px" }}>面接種別 / TYPE</label>
-          <select value={iType} onChange={e=>setIType(e.target.value)}
+          <select value={["1次面接","2次面接","3次面接","最終面接","OB/OG訪問","模擬面接"].includes(iType)?iType:"その他"}
+            onChange={e=>{ if(e.target.value!=="その他") setIType(e.target.value); else setIType(""); }}
             style={{ width:"100%",background:"transparent",borderTop:"none",borderLeft:"none",borderRight:"none",borderBottom:`1px solid rgba(26,24,20,0.25)`,
-              padding:"8px 0",fontFamily:F.min,fontSize:"1.1rem",color:C.ink,outline:"none",cursor:"pointer" }}>
-            {["1次面接","2次面接","最終面接","OB/OG訪問","模擬面接"].map(v=><option key={v}>{v}</option>)}
+              padding:"8px 0",fontFamily:F.min,fontSize:"1.1rem",color:C.ink,outline:"none",cursor:"pointer",marginBottom:"6px" }}>
+            {["1次面接","2次面接","3次面接","最終面接","OB/OG訪問","模擬面接","その他"].map(v=><option key={v}>{v}</option>)}
           </select>
+          {!["1次面接","2次面接","3次面接","最終面接","OB/OG訪問","模擬面接"].includes(iType) && (
+            <input value={iType} onChange={e=>setIType(e.target.value)} placeholder="種別を入力（例：グループ面接）"
+              autoFocus
+              style={{ width:"100%",boxSizing:"border-box",background:"transparent",borderTop:"none",borderLeft:"none",borderRight:"none",
+                borderBottom:`1px solid ${C.shu}`,padding:"6px 0",fontFamily:F.min,fontSize:"1rem",color:C.ink,outline:"none" }}/>
+          )}
         </div>
       </div>
 
