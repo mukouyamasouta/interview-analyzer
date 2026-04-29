@@ -29,7 +29,7 @@ const SEV = {
 const scoreColor = (s) => s>=80 ? C.koke : s>=70 ? C.amberT : C.shu;
 
 // ── Default API Key ───────────────────────────────────────────────────────
-const DEFAULT_API_KEY = "AIzaSyAglc7JmXn5w4OWT3dpGoLWsVwXy6dRx18";
+const DEFAULT_API_KEY = ""; // キーはユーザーが設定画面から入力する
 
 const MIME_MAP = {
   m4a: "audio/mp4", mp3: "audio/mpeg", wav: "audio/wav",
@@ -114,7 +114,7 @@ async function withRetry(fn, { maxRetries=6, onRetry } = {}) {
 }
 
 // ── Gemini API ─────────────────────────────────────────────────────────────
-async function geminiText({ apiKey, model, prompt, json=false, maxTokens=8192, onRetry }) {
+async function geminiText({ apiKey, model, prompt, json=false, maxTokens=8192, onRetry, maxRetries=6 }) {
   return withRetry(async () => {
     const url=`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(apiKey)}`;
     const body = {
@@ -131,7 +131,7 @@ async function geminiText({ apiKey, model, prompt, json=false, maxTokens=8192, o
       return parsed;
     }
     return text;
-  }, { onRetry });
+  }, { onRetry, maxRetries });
 }
 
 // Upload a file to Gemini File API using resumable upload (handles large files reliably).
@@ -506,9 +506,33 @@ const SettingsModal = ({ open, onClose, apiKey, setApiKey, model, setModel }) =>
   const test=async()=>{
     if(!tmp.trim()){setSt("error");setMsg("APIキーを入力してください");return;}
     setSt("testing"); setMsg(""); setResT("");
-    try { const r=await geminiText({apiKey:tmp.trim(),model:tmpM,prompt:"「接続テスト成功」と一言だけ返してください。",maxTokens:50});
+    try {
+      const r=await geminiText({
+        apiKey:tmp.trim(), model:tmpM,
+        prompt:"「接続テスト成功」と一言だけ返してください。",
+        maxTokens:50,
+        // テストではリトライしない（すぐにエラー内容を見せる）
+        maxRetries:0,
+      });
       setSt("success"); setResT(r.trim()); setMsg("接続に成功しました");
-    } catch(e){ setSt("error"); setMsg(e.message||"接続に失敗しました"); }
+    } catch(e){
+      setSt("error");
+      // エラー内容を分かりやすく日本語に変換
+      const raw = e.message || "";
+      let hint = "";
+      if (/API_KEY_INVALID|invalid.*key|api key not valid/i.test(raw)) {
+        hint = "APIキーが無効です。Google AI StudioでAPIキーを確認してください。";
+      } else if (/PERMISSION_DENIED|permission denied/i.test(raw)) {
+        hint = "APIキーの権限がありません。Gemini APIが有効になっているか確認してください。";
+      } else if (/quota|rate.?limit|429/i.test(raw)) {
+        hint = "レート制限またはクォータ超過です。しばらく待ってから再試行してください。";
+      } else if (/model.*not.*found|not.*supported/i.test(raw)) {
+        hint = `選択中のモデル「${tmpM}」がこのAPIキーで使用できません。別のモデルをお試しください。`;
+      } else if (/network|fetch|failed to fetch/i.test(raw)) {
+        hint = "ネットワークエラーです。インターネット接続を確認してください。";
+      }
+      setMsg(hint ? `${hint}\n\n詳細: ${raw}` : raw || "接続に失敗しました");
+    }
   };
   const save=async()=>{
     setApiKey(tmp.trim()); setModel(tmpM);
@@ -1663,9 +1687,7 @@ export default function App() {
       try{
         const r=await window.storage.get("gemini_api_key");
         if(r?.value) setApiKey(r.value);
-        else {
-          await window.storage.set("gemini_api_key", DEFAULT_API_KEY);
-        }
+        // ストレージにキーがない場合は何も書き込まない（ユーザーに設定してもらう）
       }catch{}
       try{ const r=await window.storage.get("gemini_model"); if(r?.value) setModel(r.value); }catch{}
 
