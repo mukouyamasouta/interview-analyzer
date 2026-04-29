@@ -17,9 +17,9 @@ const C = {
 };
 const F = { min:"'Shippori Mincho B1', serif", sans:"'Noto Sans JP', sans-serif" };
 const MODELS = [
-  { id:"gemini-2.0-flash", label:"Gemini 2.0 Flash", desc:"高速・無料枠あり" },
-  { id:"gemini-2.5-flash", label:"Gemini 2.5 Flash", desc:"バランス型・推奨" },
-  { id:"gemini-2.5-pro",   label:"Gemini 2.5 Pro",   desc:"高精度・複雑分析向け" },
+  { id:"gemini-2.0-flash", label:"Gemini 2.0 Flash", desc:"高速・無料枠が広い（クォータ超過時はこちら）" },
+  { id:"gemini-2.5-flash", label:"Gemini 2.5 Flash", desc:"バランス型・推奨（無料枠: 1分あたり20件）" },
+  { id:"gemini-2.5-pro",   label:"Gemini 2.5 Pro",   desc:"高精度・複雑分析向け（有料プラン推奨）" },
 ];
 const SEV = {
   high:  { dot:C.shu,    bg:C.shu10,  textColor:C.shu,    label:"重要" },
@@ -524,8 +524,8 @@ const SettingsModal = ({ open, onClose, apiKey, setApiKey, model, setModel }) =>
         hint = "APIキーが無効です。Google AI StudioでAPIキーを確認してください。";
       } else if (/PERMISSION_DENIED|permission denied/i.test(raw)) {
         hint = "APIキーの権限がありません。Gemini APIが有効になっているか確認してください。";
-      } else if (/quota|rate.?limit|429/i.test(raw)) {
-        hint = "レート制限またはクォータ超過です。しばらく待ってから再試行してください。";
+      } else if (/quota|rate.?limit|429|free_tier/i.test(raw)) {
+        hint = `無料枠の上限に達しています。\n① 設定で「Gemini 2.0 Flash」に切り替えてお試しください。\n② または Google AI Studio (aistudio.google.com) でPay-as-you-goプランを有効にしてください。`;
       } else if (/model.*not.*found|not.*supported/i.test(raw)) {
         hint = `選択中のモデル「${tmpM}」がこのAPIキーで使用できません。別のモデルをお試しください。`;
       } else if (/network|fetch|failed to fetch/i.test(raw)) {
