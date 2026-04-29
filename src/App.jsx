@@ -75,6 +75,27 @@ function safeJsonParse(text) {
   return null;
 }
 
+// ── Background-keepalive: play a silent audio loop so Chrome / Safari treat the
+// tab as "playing media" and skip background-tab throttling for timers + fetch.
+// Returns a cleanup function.
+function startBackgroundKeepalive() {
+  try {
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    gain.gain.value = 0.0001; // effectively silent
+    osc.frequency.value = 20; // sub-audible
+    osc.connect(gain).connect(ctx.destination);
+    osc.start();
+    return () => {
+      try { osc.stop(); } catch {}
+      try { ctx.close(); } catch {}
+    };
+  } catch {
+    return () => {};
+  }
+}
+
 // ── Retry utility (handles Gemini overload / rate-limit errors) ───────────────
 const RETRYABLE = /high demand|overloaded|quota|rate.?limit|503|429|temporarily/i;
 async function withRetry(fn, { maxRetries=3, onRetry } = {}) {
@@ -112,41 +133,88 @@ async function geminiText({ apiKey, model, prompt, json=false, maxTokens=8192, o
   }, { onRetry });
 }
 
-// Upload a file to Gemini File API (for files > 20MB)
+// Upload a file to Gemini File API using resumable upload (handles large files reliably).
+// Uses XMLHttpRequest so we get true upload progress and the request keeps running
+// even when the page is in a background tab (browsers do NOT throttle XHR uploads).
 async function uploadToFileAPI(apiKey, file, onProgress) {
   const mimeType = resolvedMime(file);
-  const boundary = "gemini_boundary_" + Math.random().toString(36).slice(2);
-  const metaJson = JSON.stringify({ file: { display_name: file.name } });
 
-  // Build multipart/related body
-  const encoder = new TextEncoder();
-  const metaPart = encoder.encode(
-    `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${metaJson}\r\n`
-  );
-  const filePart = encoder.encode(`--${boundary}\r\nContent-Type: ${mimeType}\r\n\r\n`);
-  const closing  = encoder.encode(`\r\n--${boundary}--`);
-  const fileBytes = await file.arrayBuffer();
-
-  const body = new Uint8Array(metaPart.length + filePart.length + fileBytes.byteLength + closing.length);
-  let offset = 0;
-  body.set(metaPart,  offset); offset += metaPart.length;
-  body.set(filePart,  offset); offset += filePart.length;
-  body.set(new Uint8Array(fileBytes), offset); offset += fileBytes.byteLength;
-  body.set(closing,   offset);
-
-  onProgress?.(10);
-
-  const uploadUrl = `https://generativelanguage.googleapis.com/upload/v1beta/files?key=${encodeURIComponent(apiKey)}&uploadType=multipart`;
-  const res = await fetch(uploadUrl, {
+  // Step 1: Start a resumable upload session — server returns an upload URL in the headers.
+  const startUrl = `https://generativelanguage.googleapis.com/upload/v1beta/files?key=${encodeURIComponent(apiKey)}`;
+  const startRes = await fetch(startUrl, {
     method: "POST",
-    headers: { "Content-Type": `multipart/related; boundary=${boundary}` },
-    body: body,
+    headers: {
+      "X-Goog-Upload-Protocol": "resumable",
+      "X-Goog-Upload-Command": "start",
+      "X-Goog-Upload-Header-Content-Length": String(file.size),
+      "X-Goog-Upload-Header-Content-Type": mimeType,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ file: { display_name: file.name } }),
   });
-  const data = await res.json();
-  if (!res.ok) throw new Error(data?.error?.message || `File API upload failed: HTTP ${res.status}`);
+  if (!startRes.ok) {
+    const errText = await startRes.text().catch(() => "");
+    throw new Error(`File API upload start failed: HTTP ${startRes.status} ${errText.slice(0, 200)}`);
+  }
+  const uploadUrl = startRes.headers.get("X-Goog-Upload-URL") || startRes.headers.get("x-goog-upload-url");
+  if (!uploadUrl) throw new Error("File API: upload URL not returned");
 
-  onProgress?.(80);
-  return data.file; // { uri, mimeType, name, ... }
+  // Step 2: Upload the bytes via XHR so we can observe real progress.
+  // XHR uploads are NOT throttled by background-tab heuristics (unlike timers/fetch in some scenarios).
+  const file_data = await new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", uploadUrl, true);
+    xhr.setRequestHeader("Content-Length", String(file.size));
+    xhr.setRequestHeader("X-Goog-Upload-Offset", "0");
+    xhr.setRequestHeader("X-Goog-Upload-Command", "upload, finalize");
+
+    xhr.upload.onprogress = (ev) => {
+      if (ev.lengthComputable && onProgress) {
+        // Reserve 0–95% for the byte transfer; the remaining 5% is server-side processing.
+        onProgress(Math.min(95, Math.round((ev.loaded / ev.total) * 95)));
+      }
+    };
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        try {
+          const json = JSON.parse(xhr.responseText);
+          onProgress?.(100);
+          resolve(json.file || json);
+        } catch (e) {
+          reject(new Error(`File API: invalid JSON response: ${e.message}`));
+        }
+      } else {
+        reject(new Error(`File API upload failed: HTTP ${xhr.status} ${xhr.responseText.slice(0, 200)}`));
+      }
+    };
+    xhr.onerror = () => reject(new Error("File API: network error during upload"));
+    xhr.ontimeout = () => reject(new Error("File API: upload timed out"));
+    xhr.timeout = 30 * 60 * 1000; // 30 min
+    xhr.send(file);
+  });
+
+  // The returned file's state may be "PROCESSING" — wait until it becomes ACTIVE.
+  return await waitForFileActive(apiKey, file_data);
+}
+
+async function waitForFileActive(apiKey, fileData, { maxWaitMs = 120000, intervalMs = 2000 } = {}) {
+  if (!fileData?.name) return fileData;
+  if (fileData.state === "ACTIVE") return fileData;
+  const start = Date.now();
+  while (Date.now() - start < maxWaitMs) {
+    try {
+      const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/${fileData.name}?key=${encodeURIComponent(apiKey)}`);
+      if (r.ok) {
+        const j = await r.json();
+        if (j.state === "ACTIVE") return j;
+        if (j.state === "FAILED") throw new Error(`File processing failed: ${j.error?.message || "unknown"}`);
+      }
+    } catch (e) {
+      if (/processing failed/i.test(e.message)) throw e;
+    }
+    await new Promise(r => setTimeout(r, intervalMs));
+  }
+  return fileData; // best effort — let the generate call surface any remaining issue
 }
 
 async function geminiAudio({ apiKey, model, file, fileUri, mimeTypeOverride, prompt, maxTokens=65536, onUploadProgress, onRetry }) {
@@ -202,20 +270,24 @@ const TRANSCRIBE_PROMPT = `この音声は日本語の面接です。音声の�
 
 【重要ルール】:
 - 音声の最初から最後まで全てを書き起こす。途中で終わったり要約したりしないこと
+- 30分・40分など長尺音声でも、必ず音声の最後まで書き起こすこと
 - フィラー（「えーと」「あの」等）も省略せず正確に書く
 - 沈黙は無視
 - 質問・問いかけが面接官、回答が志望者
+- 各行の先頭には必ず [面接官 MM:SS] または [志望者 MM:SS] のタイムスタンプ付きヘッダを付けること
 - JSON・マークダウン・説明文不要。フォーマット通りの行のみを出力`;
 
-// Continuation prompt for when the first pass was cut short
+// Continuation prompt for when the previous pass was cut short
 const makeContinuePrompt = (lastTime) =>
   `この音声ファイルの ${lastTime} 以降の発話を全て最後まで以下のフォーマットで書き起こしてください。先に出力した部分は繰り返さないこと。
 
 [面接官 MM:SS] 発話内容
 [志望者 MM:SS] 発話内容
 
-- ${lastTime} より後の発話のみを出力する
+【重要ルール】:
+- ${lastTime} より後の発話のみを出力する（${lastTime} 以前は絶対に再出力しない）
 - 音声の最後まで全て書き起こす。途中で止めないこと
+- 各行の先頭には必ず [面接官 MM:SS] または [志望者 MM:SS] のタイムスタンプ付きヘッダを付けること
 - JSON・マークダウン・説明文不要`;
 
 // Estimate audio duration from file size (rough: compressed audio ~1.5MB/min)
@@ -303,6 +375,15 @@ ${JSON.stringify(qaList, null, 2)}
 
 出力フォーマット(JSONのみ。コードブロック不要):
 {
+  "summary": "面接全体の要約(300〜500字)。志望者がどんな人物で、何をどう語ったかを第三者が読んで掴めるように",
+  "keyPoints": ["論点1(80字以内)", "論点2(80字以内)", "論点3(80字以内)", "論点4(80字以内)", "論点5(80字以内)"],
+  "structure": {
+    "topics": [
+      { "topic": "話題テーマ(例:志望動機)", "summary": "そのテーマで何が語られたか(80〜150字)" }
+    ],
+    "candidateProfile": "志望者像のまとめ(150〜250字)",
+    "interviewFlow": "面接全体の流れ・進行の特徴(150〜250字)"
+  },
   "scores": {
     "responseSpeed": 0〜100の整数,
     "appropriateness": 0〜100の整数,
@@ -497,7 +578,7 @@ const LoadingOverlay = ({ stage, uploadPct, retryInfo }) => {
 
   const stages = {
     upload: uploadPct != null ? `音声をアップロード中... ${uploadPct}%` : "音声をアップロード中...",
-    transcribe: "音声を文字起こし中...",
+    transcribe: "音声を文字起こし中（長尺は数分かかります）...",
     qa: "質問と回答を抽出中...",
     feedback: "AIが面接を分析中...",
   };
@@ -512,6 +593,11 @@ const LoadingOverlay = ({ stage, uploadPct, retryInfo }) => {
           </svg>
         </div>
         <p style={{ fontFamily:F.min,fontSize:"1.1rem",color:C.ink,marginBottom:6 }}>{stages[stage]||"処理中..."}</p>
+        {stage === "upload" && uploadPct != null && (
+          <div style={{ width:"100%",maxWidth:360,margin:"12px auto 8px",height:6,background:C.tan,borderRadius:3,overflow:"hidden" }}>
+            <div style={{ width:`${uploadPct}%`, height:"100%", background:C.shu, transition:"width 0.2s" }}/>
+          </div>
+        )}
         {retryInfo ? (
           <div style={{ padding:"12px 16px",background:C.amber10,border:`1px solid rgba(193,154,75,0.4)`,marginBottom:16 }}>
             <p style={{ fontSize:"12px",color:C.amberT,margin:0,lineHeight:1.7 }}>
@@ -541,6 +627,37 @@ const LoadingOverlay = ({ stage, uploadPct, retryInfo }) => {
 
 
 
+// Extract text from a PDF using pdf.js (loaded on demand from CDN).
+// Image-only / scanned PDFs are NOT supported (no OCR).
+async function extractPdfText(file) {
+  if (!window.pdfjsLib) {
+    await new Promise((resolve, reject) => {
+      const s = document.createElement("script");
+      s.src = "https://cdn.jsdelivr.net/npm/pdfjs-dist@4.6.82/build/pdf.min.mjs";
+      s.type = "module";
+      s.onload = resolve;
+      s.onerror = () => reject(new Error("pdf.js の読み込みに失敗しました"));
+      document.head.appendChild(s);
+    });
+    // Module scripts don't expose a global; fall back to dynamic import
+    if (!window.pdfjsLib) {
+      const mod = await import(/* @vite-ignore */ "https://cdn.jsdelivr.net/npm/pdfjs-dist@4.6.82/build/pdf.min.mjs");
+      window.pdfjsLib = mod;
+      window.pdfjsLib.GlobalWorkerOptions.workerSrc =
+        "https://cdn.jsdelivr.net/npm/pdfjs-dist@4.6.82/build/pdf.worker.min.mjs";
+    }
+  }
+  const buf = await file.arrayBuffer();
+  const pdf = await window.pdfjsLib.getDocument({ data: buf }).promise;
+  const out = [];
+  for (let i = 1; i <= pdf.numPages; i++) {
+    const page = await pdf.getPage(i);
+    const c = await page.getTextContent();
+    out.push(c.items.map(it => it.str).join(" "));
+  }
+  return out.join("\n\n");
+}
+
 // ── Input Tab ─────────────────────────────────────────────────────────────
 const InputTab = ({ onAnalyze, hasKey, onOpenSettings, busy }) => {
   const [mode, setMode]=useState("upload");
@@ -550,7 +667,35 @@ const InputTab = ({ onAnalyze, hasKey, onOpenSettings, busy }) => {
   const [file, setFile]=useState(null);
   const [error, setError]=useState("");
   const [dragOver, setDragOver]=useState(false);
+  const [textFileLoading, setTextFileLoading]=useState(false);
   const fileRef=useRef(null);
+  const textFileRef=useRef(null);
+
+  const handleTextFile = async (e) => {
+    const f = e.target.files?.[0];
+    if (!f) return;
+    setError(""); setTextFileLoading(true);
+    try {
+      const ext = f.name.split(".").pop().toLowerCase();
+      let content = "";
+      if (ext === "pdf") {
+        content = await extractPdfText(f);
+        if (!content.trim()) {
+          throw new Error("このPDFからテキストを抽出できませんでした（画像のみのPDFは未対応）");
+        }
+      } else if (["txt","md","markdown"].includes(ext)) {
+        content = await f.text();
+      } else {
+        throw new Error(`「.${ext}」は対応していません。.txt / .md / .pdf を選択してください`);
+      }
+      setText(content);
+    } catch (err) {
+      setError(err.message || "ファイルの読み込みに失敗しました");
+    } finally {
+      setTextFileLoading(false);
+      if (textFileRef.current) textFileRef.current.value = "";
+    }
+  };
 
   const validateAndSet = (f) => {
     if (!f) return;
@@ -560,8 +705,8 @@ const InputTab = ({ onAnalyze, hasKey, onOpenSettings, busy }) => {
       setError(`「.${ext}」は対応していません。MP3 / WAV / M4A / MP4 などをお使いください。`);
       return;
     }
-    if (f.size > 500*1024*1024) {
-      setError("ファイルサイズが大きすぎます。500MB以下のファイルをお使いください。");
+    if (f.size > 600*1024*1024) {
+      setError("ファイルサイズが大きすぎます。600MB以下のファイルをお使いください。");
       return;
     }
     setError("");
@@ -677,13 +822,27 @@ const InputTab = ({ onAnalyze, hasKey, onOpenSettings, busy }) => {
                 </>
               : <>
                   <p style={{ fontFamily:F.min,fontSize:"1.1rem",color:C.ink,marginBottom:"6px",marginTop:0 }}>クリックまたはドラッグ＆ドロップ</p>
-                  <p style={{ fontSize:"12px",color:C.ink40,margin:0 }}>MP3 / WAV / <strong style={{color:C.koke2}}>M4A</strong> / MP4 — 最大500MB</p>
+                  <p style={{ fontSize:"12px",color:C.ink40,margin:0 }}>MP3 / WAV / <strong style={{color:C.koke2}}>M4A</strong> / MP4 — 最大600MB / 約40〜60分</p>
                 </>
             }
           </div>
         )}
         {mode==="text"&&(
           <div>
+            <div style={{ display:"flex",gap:"8px",marginBottom:"12px",alignItems:"center" }}>
+              <input ref={textFileRef} type="file" accept=".txt,.md,.markdown,.pdf,text/plain,text/markdown,application/pdf"
+                onChange={handleTextFile} style={{ display:"none" }}/>
+              <button type="button" onClick={()=>textFileRef.current?.click()} disabled={textFileLoading}
+                style={{ display:"flex",alignItems:"center",gap:"8px",padding:"8px 14px",fontSize:"12px",fontFamily:F.sans,
+                  border:`1px solid ${C.tan2}`,background:"transparent",color:C.ink,cursor:textFileLoading?"wait":"pointer",
+                  opacity:textFileLoading?0.6:1,transition:"all 0.2s" }}
+                onMouseEnter={e=>{ if(!textFileLoading){ e.currentTarget.style.borderColor=C.shu; e.currentTarget.style.color=C.shu; }}}
+                onMouseLeave={e=>{ e.currentTarget.style.borderColor=C.tan2; e.currentTarget.style.color=C.ink; }}>
+                <Upload size={13} strokeWidth={1.5}/>
+                {textFileLoading ? "読み込み中..." : "テキストファイルから読み込む (.txt / .md / .pdf)"}
+              </button>
+              <span style={{ fontSize:"11px",color:C.ink40 }}>または下に直接貼り付け</span>
+            </div>
             <textarea value={text} onChange={e=>setText(e.target.value)} placeholder="面接の文字起こしテキストを直接貼り付けてください..."
               style={{ width:"100%",boxSizing:"border-box",height:"256px",padding:"20px",fontSize:"15px",fontFamily:F.sans,
                 color:C.ink,background:C.paper,border:`1px solid ${C.tan2}`,outline:"none",resize:"none",lineHeight:1.8 }}
@@ -874,6 +1033,60 @@ const FeedbackTab = ({ session, feedback, onSave, onExport, saved }) => {
         </div>
       </div>
 
+      {feedback.summary && (
+        <div>
+          <SectionTitle color={C.ink} label="OVERVIEW / 全体サマリー"/>
+          <div style={{ padding:"24px",background:C.paper,border:`1px solid ${C.tan2}` }}>
+            <p style={{ fontFamily:F.min,fontSize:"1.02rem",color:C.ink,lineHeight:1.95,margin:0,whiteSpace:"pre-wrap" }}>{feedback.summary}</p>
+          </div>
+        </div>
+      )}
+
+      {feedback.keyPoints && feedback.keyPoints.length > 0 && (
+        <div>
+          <SectionTitle color={C.shu} label="KEY POINTS / 主な論点"/>
+          <div style={{ display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(280px,1fr))",gap:"10px" }}>
+            {feedback.keyPoints.map((kp,i)=>(
+              <div key={i} style={{ display:"flex",alignItems:"flex-start",gap:"12px",padding:"14px 16px",background:i%2===0?C.shu10:C.koke10,
+                borderLeft:`3px solid ${i%2===0?C.shu:C.koke}` }}>
+                <span style={{ fontFamily:F.min,fontSize:"1.1rem",color:i%2===0?C.shu:C.koke2,minWidth:"20px" }}>{i+1}.</span>
+                <span style={{ fontSize:"13px",color:C.ink,lineHeight:1.75 }}>{kp}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {feedback.structure && (feedback.structure.candidateProfile || feedback.structure.interviewFlow || feedback.structure.topics?.length) && (
+        <div>
+          <SectionTitle color={C.koke2} label="STRUCTURED ANALYSIS / 構造化分析"/>
+          <div style={{ display:"grid",gridTemplateColumns:feedback.structure.candidateProfile&&feedback.structure.interviewFlow?"1fr 1fr":"1fr",gap:"16px",marginBottom:feedback.structure.topics?.length?"20px":0 }}>
+            {feedback.structure.candidateProfile && (
+              <div style={{ padding:"20px",background:C.paper,borderTop:`3px solid ${C.koke}` }}>
+                <p style={{ fontSize:"11px",letterSpacing:"0.25em",color:C.koke2,margin:"0 0 10px" }}>志望者像</p>
+                <p style={{ fontSize:"13px",color:C.ink,lineHeight:1.85,margin:0 }}>{feedback.structure.candidateProfile}</p>
+              </div>
+            )}
+            {feedback.structure.interviewFlow && (
+              <div style={{ padding:"20px",background:C.paper,borderTop:`3px solid ${C.shu}` }}>
+                <p style={{ fontSize:"11px",letterSpacing:"0.25em",color:C.shu,margin:"0 0 10px" }}>面接の流れ</p>
+                <p style={{ fontSize:"13px",color:C.ink,lineHeight:1.85,margin:0 }}>{feedback.structure.interviewFlow}</p>
+              </div>
+            )}
+          </div>
+          {feedback.structure.topics?.length > 0 && (
+            <div style={{ display:"flex",flexDirection:"column",gap:"8px" }}>
+              {feedback.structure.topics.map((t,i)=>(
+                <div key={i} style={{ display:"grid",gridTemplateColumns:"180px 1fr",gap:"16px",padding:"14px 16px",background:i%2?C.cream:"transparent",border:`1px solid ${C.tan2}` }}>
+                  <div style={{ fontFamily:F.min,fontSize:"14px",color:C.ink,fontWeight:500 }}>{t.topic}</div>
+                  <div style={{ fontSize:"13px",color:C.ink60,lineHeight:1.75 }}>{t.summary}</div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
       {feedback.topPriority && (
         <div style={{ position:"relative",overflow:"hidden",padding:"28px",background:C.ink }}>
           <div style={{ position:"absolute",top:0,right:0,width:"160px",height:"160px",borderRadius:"50%",background:C.shu,opacity:0.22,transform:"translate(40%,-40%)" }}/>
@@ -1051,6 +1264,33 @@ function sessionToText(session) {
   lines.push(`日付: ${session.date}`);
   lines.push(`総合スコア: ${fb.scores?.overall||"-"}/100`);
   lines.push("");
+  if (fb.summary) {
+    lines.push("── 全体サマリー ──");
+    lines.push(fb.summary);
+    lines.push("");
+  }
+  if (fb.keyPoints?.length) {
+    lines.push("── 主な論点 ──");
+    fb.keyPoints.forEach((kp,i)=>lines.push(`${i+1}. ${kp}`));
+    lines.push("");
+  }
+  if (fb.structure) {
+    if (fb.structure.candidateProfile) {
+      lines.push("── 志望者像 ──");
+      lines.push(fb.structure.candidateProfile);
+      lines.push("");
+    }
+    if (fb.structure.interviewFlow) {
+      lines.push("── 面接の流れ ──");
+      lines.push(fb.structure.interviewFlow);
+      lines.push("");
+    }
+    if (fb.structure.topics?.length) {
+      lines.push("── 話題テーマ ──");
+      fb.structure.topics.forEach(t=>lines.push(`【${t.topic}】 ${t.summary}`));
+      lines.push("");
+    }
+  }
   lines.push("── スコア内訳 ──");
   if (fb.scores) {
     lines.push(`応答速度: ${fb.scores.responseSpeed}`);
@@ -1139,6 +1379,11 @@ function sessionToPdfHtml(session) {
     <div>論理的思考: ${fb.scores?.logicalThinking||"-"}</div>
   </div>
 </div>
+${fb.summary?`<h2>OVERVIEW / 全体サマリー</h2><p style="white-space:pre-wrap;">${safe(fb.summary)}</p>`:""}
+${fb.keyPoints?.length?`<h2>KEY POINTS / 主な論点</h2><ul>${fb.keyPoints.map(kp=>`<li>${safe(kp)}</li>`).join("")}</ul>`:""}
+${fb.structure?.candidateProfile?`<h2>志望者像</h2><p>${safe(fb.structure.candidateProfile)}</p>`:""}
+${fb.structure?.interviewFlow?`<h2>面接の流れ</h2><p>${safe(fb.structure.interviewFlow)}</p>`:""}
+${fb.structure?.topics?.length?`<h2>話題テーマ</h2>${fb.structure.topics.map(t=>`<div class="qa"><strong>${safe(t.topic)}</strong><div style="font-size:13px;margin-top:4px;">${safe(t.summary)}</div></div>`).join("")}`:""}
 ${fb.topPriority?`<div class="top-priority"><strong style="color:#B8412C;">★ 最優先で改善</strong><p>${safe(fb.topPriority)}</p></div>`:""}
 ${fb.strengths?.length?`<h2>STRENGTHS / 評価できる点</h2><ul>${fb.strengths.map(s=>`<li>${safe(s)}</li>`).join("")}</ul>`:""}
 ${fb.items?.length?`<h2>DETAILED FEEDBACK / 詳細な指摘</h2>${fb.items.map((it,i)=>`
@@ -1179,6 +1424,14 @@ export default function App() {
   const [saved, setSaved] = useState(false);
   const [history, setHistory] = useState([]);
   const [retryInfo, setRetryInfo] = useState(null);
+
+  // Warn the user if they try to close the tab during analysis
+  useEffect(() => {
+    if (!busy) return;
+    const handler = (e) => { e.preventDefault(); e.returnValue = ""; };
+    window.addEventListener("beforeunload", handler);
+    return () => window.removeEventListener("beforeunload", handler);
+  }, [busy]);
 
   useEffect(()=>{
     (async()=>{
@@ -1256,6 +1509,15 @@ export default function App() {
       try {
         if ('wakeLock' in navigator) wakeLock = await navigator.wakeLock.request('screen');
       } catch {}
+      // Re-acquire wake lock when the tab becomes visible again (browsers auto-release on hide)
+      const onVisibilityForWakeLock = async () => {
+        if (document.visibilityState === 'visible' && 'wakeLock' in navigator) {
+          try { wakeLock = await navigator.wakeLock.request('screen'); } catch {}
+        }
+      };
+      document.addEventListener('visibilitychange', onVisibilityForWakeLock);
+      // Silent audio keepalive — keeps timers/fetch un-throttled in background tabs.
+      const stopKeepalive = startBackgroundKeepalive();
 
       try {
       const { mode, file, text, company, iType } = args; // ← 引数を展開
@@ -1276,7 +1538,7 @@ export default function App() {
             maxTokens: 65536,
             onUploadProgress: (pct) => {
               setUploadPct(pct);
-              if (pct >= 80) { setBusy("transcribe"); setUploadPct(null); }
+              if (pct >= 95) { setBusy("transcribe"); setUploadPct(null); }
             },
             onRetry: (attempt, waitMs) => { setBusy("transcribe"); setRetryInfo({ attempt, waitMs }); }
           });
@@ -1284,32 +1546,55 @@ export default function App() {
           setBusy("transcribe");
           transcript = parseTranscriptText(pass1.text);
 
-          // Continuation: check if we got the full audio
+          // Continuation loop — keep requesting "after MM:SS" until we either
+          // reach (close to) the estimated end OR the model stops asking for more tokens.
           const estimatedMin = estimateAudioMinutes(file);
-          const lastEntry = transcript[transcript.length - 1];
-          const lastSec = timeToSeconds(lastEntry?.time || "0:00");
-          const coverageRatio = estimatedMin > 0 ? lastSec / (estimatedMin * 60) : 1;
+          const estimatedSec = estimatedMin * 60;
+          const COVERAGE_TARGET = 0.95;
+          const MAX_CONTINUATION_PASSES = 8;
+          let prevFinish = pass1.finishReason;
+          let fileUri = pass1.fileUri;
 
-          // If we covered less than 75% of estimated duration, request continuation
-          if (pass1.fileUri && coverageRatio < 0.75 && lastEntry?.time) {
-            setBusy("transcribe"); // keep transcribing indicator
+          for (let pass = 0; pass < MAX_CONTINUATION_PASSES; pass++) {
+            const lastEntry = transcript[transcript.length - 1];
+            const lastSec = timeToSeconds(lastEntry?.time || "0:00");
+            const coverageRatio = estimatedSec > 0 ? lastSec / estimatedSec : 1;
+            const truncated = prevFinish === "MAX_TOKENS";
+
+            // Stop if we have coverage AND the model didn't hit the token cap.
+            if (coverageRatio >= COVERAGE_TARGET && !truncated) break;
+            // Need a fileUri to request a continuation; small files use inline base64
+            // and don't have one — re-use the local file in that case.
+            if (!lastEntry?.time) break;
+
+            setBusy("transcribe");
             const lastTime = lastEntry.time;
-            const pass2 = await geminiAudio({
-              apiKey, model,
-              fileUri: pass1.fileUri,
-              mimeTypeOverride: resolvedMime(file),
-              prompt: makeContinuePrompt(lastTime),
-              maxTokens: 65536,
-              onRetry: (attempt, waitMs) => { setBusy("transcribe"); setRetryInfo({ attempt, waitMs }); }
-            });
-            setRetryInfo(null);
-            const extra = parseTranscriptText(pass2.text);
-            // Merge, deduplicating any overlap at the seam
-            if (extra.length > 0) {
-              const lastTranscriptTime = lastEntry.time;
-              const filtered = extra.filter(e => !e.time || timeToSeconds(e.time) > timeToSeconds(lastTranscriptTime) - 5);
-              transcript = [...transcript, ...filtered];
+            let nextPass;
+            try {
+              nextPass = await geminiAudio({
+                apiKey, model,
+                ...(fileUri ? { fileUri, mimeTypeOverride: resolvedMime(file) } : { file }),
+                prompt: makeContinuePrompt(lastTime),
+                maxTokens: 65536,
+                onRetry: (attempt, waitMs) => { setBusy("transcribe"); setRetryInfo({ attempt, waitMs }); }
+              });
+            } catch (e) {
+              console.warn(`Continuation pass ${pass + 1} failed:`, e.message);
+              break;
             }
+            setRetryInfo(null);
+            fileUri = nextPass.fileUri || fileUri;
+            prevFinish = nextPass.finishReason;
+            const extra = parseTranscriptText(nextPass.text);
+            if (extra.length === 0) break; // model has nothing more to say
+            // Merge, deduplicating any overlap at the seam
+            const lastTranscriptSec = timeToSeconds(lastTime);
+            const filtered = extra.filter(e => !e.time || timeToSeconds(e.time) > lastTranscriptSec - 5);
+            if (filtered.length === 0) break; // overlap-only — no real progress
+            const newLastSec = timeToSeconds(filtered[filtered.length - 1]?.time || lastTime);
+            transcript = [...transcript, ...filtered];
+            // Safety: if no forward progress (>=10s) was made, stop to avoid infinite loop
+            if (newLastSec - lastTranscriptSec < 10) break;
           }
 
           if (transcript.length === 0) {
@@ -1356,7 +1641,7 @@ export default function App() {
       // STEP 3: feedback
       setBusy("feedback");
       const fbResult = await geminiText({
-        apiKey, model, prompt: FEEDBACK_PROMPT(qaList.length > 0 ? qaList : plainText, company, iType), json: true, maxTokens: 8192,
+        apiKey, model, prompt: FEEDBACK_PROMPT(qaList.length > 0 ? qaList : plainText, company, iType), json: true, maxTokens: 16384,
         onRetry: (attempt, waitMs) => { setBusy("feedback"); setRetryInfo({ attempt, waitMs }); }
       });
       setRetryInfo(null);
@@ -1371,6 +1656,8 @@ export default function App() {
       setBusy(null);
       setRetryInfo(null);
     } finally {
+      try { document.removeEventListener('visibilitychange', onVisibilityForWakeLock); } catch {}
+      try { stopKeepalive(); } catch {}
       try { if (wakeLock) await wakeLock.release(); } catch {}
     }
   };
