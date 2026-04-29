@@ -1311,48 +1311,87 @@ const HistoryTab = ({ history, onLoad, onDelete, onExportSession }) => {
       <StepLabel num="05" title="過去の面接履歴"/>
       <div style={{ borderTop:`1px solid ${C.tan2}` }}>
         {history.map((s,i)=>(
-          <div key={s.sessionId} style={{ display:"flex",alignItems:"center",justifyContent:"space-between",padding:"20px 16px",
-            borderBottom:`1px solid ${C.tan2}`,cursor:"pointer",transition:"background 0.2s" }}
-            onClick={()=>onLoad(s.sessionId)}
-            onMouseEnter={e=>{
-              e.currentTarget.style.background=C.tan+"55";
-              e.currentTarget.querySelector(".hist-actions").style.opacity="1";
-            }}
-            onMouseLeave={e=>{
-              e.currentTarget.style.background="transparent";
-              e.currentTarget.querySelector(".hist-actions").style.opacity="0";
-            }}>
-            <div style={{ display:"flex",alignItems:"center",gap:"20px" }}>
-              <div style={{ position:"relative",width:"52px",height:"52px",flexShrink:0 }}>
-                <svg width="52" height="52" viewBox="0 0 52 52">
-                  <circle cx="26" cy="26" r="22" fill="none" stroke={C.tan} strokeWidth="4"/>
-                  <circle cx="26" cy="26" r="22" fill="none" stroke={scoreColor(s.score)} strokeWidth="4"
-                    strokeDasharray={`${2*Math.PI*22*s.score/100} ${2*Math.PI*22}`}
-                    strokeLinecap="round" transform="rotate(-90 26 26)"/>
-                </svg>
-                <span style={{ position:"absolute",inset:0,display:"flex",alignItems:"center",justifyContent:"center",
-                  fontFamily:F.min,fontSize:"13px",fontWeight:500,color:scoreColor(s.score) }}>{s.score}</span>
-              </div>
-              <div>
-                <h4 style={{ fontFamily:F.min,fontSize:"1.1rem",color:C.ink,margin:"0 0 6px" }}>{s.company||"(会社名なし)"}</h4>
-                <div style={{ display:"flex",alignItems:"center",gap:"10px",fontSize:"12px",color:C.ink60 }}>
-                  <span style={{ padding:"2px 8px",background:[C.shu10,C.koke10,C.tan][i%3],color:[C.shu2,C.koke2,C.ink60][i%3] }}>{s.iType}</span>
-                  <span>{s.date}</span>
+          <div key={s.sessionId} style={{ borderBottom:`1px solid ${C.tan2}`, transition:"background 0.2s" }}
+            onMouseEnter={e=>e.currentTarget.style.background=C.tan+"33"}
+            onMouseLeave={e=>e.currentTarget.style.background="transparent"}>
+            <div style={{ display:"flex",alignItems:"center",justifyContent:"space-between",padding:"20px 16px" }}>
+              {/* Score ring + meta */}
+              <div style={{ display:"flex",alignItems:"center",gap:"20px",flex:1,minWidth:0 }}>
+                <div style={{ position:"relative",width:"52px",height:"52px",flexShrink:0 }}>
+                  <svg width="52" height="52" viewBox="0 0 52 52">
+                    <circle cx="26" cy="26" r="22" fill="none" stroke={C.tan} strokeWidth="4"/>
+                    <circle cx="26" cy="26" r="22" fill="none" stroke={s.hasFeedback?scoreColor(s.score):C.ink40} strokeWidth="4"
+                      strokeDasharray={`${2*Math.PI*22*(s.hasFeedback?s.score:0)/100} ${2*Math.PI*22}`}
+                      strokeLinecap="round" transform="rotate(-90 26 26)"/>
+                  </svg>
+                  <span style={{ position:"absolute",inset:0,display:"flex",alignItems:"center",justifyContent:"center",
+                    fontFamily:F.min,fontSize:"13px",fontWeight:500,color:s.hasFeedback?scoreColor(s.score):C.ink40 }}>
+                    {s.hasFeedback ? s.score : "—"}
+                  </span>
+                </div>
+                <div style={{ minWidth:0 }}>
+                  <h4 style={{ fontFamily:F.min,fontSize:"1.1rem",color:C.ink,margin:"0 0 6px",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap" }}>
+                    {s.company||"(会社名なし)"}
+                  </h4>
+                  <div style={{ display:"flex",alignItems:"center",gap:"8px",fontSize:"12px",color:C.ink60,flexWrap:"wrap" }}>
+                    <span style={{ padding:"2px 8px",background:[C.shu10,C.koke10,C.tan][i%3],color:[C.shu2,C.koke2,C.ink60][i%3],flexShrink:0 }}>{s.iType}</span>
+                    <span style={{ flexShrink:0 }}>{s.date}</span>
+                    {s.transcriptCount > 0 && (
+                      <span style={{ color:C.ink40, flexShrink:0 }}>文字起こし {s.transcriptCount}行</span>
+                    )}
+                    {s.qaCount > 0 && (
+                      <span style={{ color:C.ink40, flexShrink:0 }}>Q&A {s.qaCount}件</span>
+                    )}
+                  </div>
                 </div>
               </div>
+              {/* Action buttons */}
+              <div style={{ display:"flex",alignItems:"center",gap:"4px",flexShrink:0,marginLeft:"12px" }}>
+                <button onClick={()=>onExportSession(s.sessionId,"json")}
+                  title="JSONエクスポート"
+                  style={{ padding:"8px",color:C.ink60,background:"none",border:"none",cursor:"pointer",transition:"all 0.2s" }}
+                  onMouseEnter={e=>{e.currentTarget.style.background=C.koke10;e.currentTarget.style.color=C.koke2;}}
+                  onMouseLeave={e=>{e.currentTarget.style.background="none";e.currentTarget.style.color=C.ink60;}}>
+                  <Download size={14} strokeWidth={1.5}/>
+                </button>
+                <button onClick={()=>{if(window.confirm("削除しますか?"))onDelete(s.sessionId);}}
+                  title="削除"
+                  style={{ padding:"8px",color:C.ink60,background:"none",border:"none",cursor:"pointer",transition:"all 0.2s" }}
+                  onMouseEnter={e=>{e.currentTarget.style.background=C.shu10;e.currentTarget.style.color=C.shu;}}
+                  onMouseLeave={e=>{e.currentTarget.style.background="none";e.currentTarget.style.color=C.ink60;}}>
+                  <Trash2 size={14} strokeWidth={1.5}/>
+                </button>
+              </div>
             </div>
-            <div className="hist-actions" style={{ display:"flex",alignItems:"center",gap:"6px",opacity:0,transition:"opacity 0.2s" }}>
-              <button onClick={(e)=>{e.stopPropagation();onExportSession(s.sessionId,"json");}} style={{ padding:"8px",color:C.ink60,background:"none",border:"none",cursor:"pointer",transition:"all 0.2s" }}
-                onMouseEnter={e=>{e.currentTarget.style.background=C.koke;e.currentTarget.style.color=C.cream;}}
-                onMouseLeave={e=>{e.currentTarget.style.background="none";e.currentTarget.style.color=C.ink60;}}>
-                <Download size={14} strokeWidth={1.5}/>
-              </button>
-              <button onClick={(e)=>{e.stopPropagation();if(window.confirm("削除しますか?"))onDelete(s.sessionId);}} style={{ padding:"8px",color:C.ink60,background:"none",border:"none",cursor:"pointer",transition:"all 0.2s" }}
-                onMouseEnter={e=>{e.currentTarget.style.background=C.shu;e.currentTarget.style.color=C.cream;}}
-                onMouseLeave={e=>{e.currentTarget.style.background="none";e.currentTarget.style.color=C.ink60;}}>
-                <Trash2 size={14} strokeWidth={1.5}/>
-              </button>
-              <ChevronRight size={16} strokeWidth={1.5} style={{ color:C.ink40 }}/>
+            {/* Navigation buttons */}
+            <div style={{ display:"flex",gap:"6px",padding:"0 16px 16px",flexWrap:"wrap" }}>
+              {s.transcriptCount > 0 && (
+                <button onClick={()=>onLoad(s.sessionId,"transcript")}
+                  style={{ display:"flex",alignItems:"center",gap:"6px",padding:"7px 14px",fontSize:"12px",fontFamily:F.sans,
+                    border:`1px solid ${C.tan2}`,background:"transparent",color:C.ink60,cursor:"pointer",transition:"all 0.2s" }}
+                  onMouseEnter={e=>{e.currentTarget.style.borderColor=C.ink;e.currentTarget.style.color=C.ink;e.currentTarget.style.background=C.tan+"44";}}
+                  onMouseLeave={e=>{e.currentTarget.style.borderColor=C.tan2;e.currentTarget.style.color=C.ink60;e.currentTarget.style.background="transparent";}}>
+                  <FileText size={12} strokeWidth={1.5}/>文字起こし
+                </button>
+              )}
+              {s.qaCount > 0 && (
+                <button onClick={()=>onLoad(s.sessionId,"qa")}
+                  style={{ display:"flex",alignItems:"center",gap:"6px",padding:"7px 14px",fontSize:"12px",fontFamily:F.sans,
+                    border:`1px solid ${C.tan2}`,background:"transparent",color:C.ink60,cursor:"pointer",transition:"all 0.2s" }}
+                  onMouseEnter={e=>{e.currentTarget.style.borderColor=C.koke;e.currentTarget.style.color=C.koke2;e.currentTarget.style.background=C.koke10;}}
+                  onMouseLeave={e=>{e.currentTarget.style.borderColor=C.tan2;e.currentTarget.style.color=C.ink60;e.currentTarget.style.background="transparent";}}>
+                  <MessageSquare size={12} strokeWidth={1.5}/>Q&A
+                </button>
+              )}
+              {s.hasFeedback && (
+                <button onClick={()=>onLoad(s.sessionId,"feedback")}
+                  style={{ display:"flex",alignItems:"center",gap:"6px",padding:"7px 14px",fontSize:"12px",fontFamily:F.sans,
+                    border:`1px solid ${C.shu}`,background:C.shu10,color:C.shu,cursor:"pointer",transition:"all 0.2s" }}
+                  onMouseEnter={e=>{e.currentTarget.style.background=C.shu;e.currentTarget.style.color=C.cream;}}
+                  onMouseLeave={e=>{e.currentTarget.style.background=C.shu10;e.currentTarget.style.color=C.shu;}}>
+                  <BarChart3 size={12} strokeWidth={1.5}/>分析結果
+                </button>
+              )}
             </div>
           </div>
         ))}
@@ -1591,7 +1630,7 @@ export default function App() {
       const list = await window.storage.list("session:");
       const sessions = [];
       for (const key of (list?.keys || [])) {
-        if (key === "session:current") continue; // 自動保存のcurrentは除外
+        if (key === "session:current") continue;
         try {
           const r = await window.storage.get(key);
           if (r?.value) {
@@ -1602,6 +1641,9 @@ export default function App() {
               iType: s.iType,
               date: s.date,
               score: s.feedback?.scores?.overall || 0,
+              transcriptCount: s.transcript?.length || 0,
+              qaCount: s.qaList?.length || 0,
+              hasFeedback: !!s.feedback,
             });
           }
         } catch {}
@@ -1824,13 +1866,23 @@ export default function App() {
     } catch (e) { setError("エクスポートに失敗: " + e.message); }
   };
 
-  const loadSession = async (sessionId) => {
+  const loadSession = async (sessionId, targetTab) => {
     try {
       const r = await window.storage.get(`session:${sessionId}`);
       if (r?.value) {
-        setSession(JSON.parse(r.value));
+        const s = JSON.parse(r.value);
+        setSession(s);
         setSaved(true);
-        setTab("feedback");
+        // targetTab が指定されていればそこへ、なければ内容に応じて最適なタブへ
+        if (targetTab) {
+          setTab(targetTab);
+        } else if (s.feedback) {
+          setTab("feedback");
+        } else if (s.qaList?.length) {
+          setTab("qa");
+        } else if (s.transcript?.length) {
+          setTab("transcript");
+        }
       }
     } catch (e) { setError("読み込みに失敗: " + e.message); }
   };
