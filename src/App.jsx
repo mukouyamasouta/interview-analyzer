@@ -326,11 +326,18 @@ function parseTranscriptText(rawText) {
 }
 
 
-const QA_PROMPT = (transcript, company, type) => `以下は面接の文字起こしです。面接官の質問と志望者の回答のペアを抽出してください。
+const QA_PROMPT = (transcript, company, type) => `あなたは面接記録の分析専門家です。以下の面接文字起こしから、面接官が発した【すべての質問】を一つも漏らさず抽出してください。
 
 【面接情報】
 - 会社名: ${company || "(未指定)"}
 - 面接種別: ${type}
+
+【重要ルール】
+- 短い確認質問・掘り下げ質問・「〜ですか？」「〜についてはどうですか？」なども含め、面接官の発話から質問を全て抽出すること
+- 同じ話題への追加質問も別エントリーとして独立させること
+- 志望者の回答は、その質問に対して志望者が話した内容を「原文に忠実」かつ「完全に」記録すること（要約しない）
+- 回答が複数の発言にわたる場合は全てを結合すること
+- 面接官の発言に質問が複数含まれる場合は分割して別エントリーにすること
 
 【文字起こし】
 ${transcript}
@@ -341,8 +348,8 @@ ${transcript}
     {
       "id": "q-001",
       "category": "自己紹介|志望動機|学生時代の経験|職務経験|スキル|キャリアビジョン|逆質問|その他 から1つ",
-      "question": "面接官の質問(原文に近い形で)",
-      "answer": "志望者の回答(原文に近い形で)",
+      "question": "面接官の質問(原文に近い形で、省略しない)",
+      "answer": "志望者の回答(原文に忠実・完全版。省略・要約しない)",
       "answerSummary": "回答を2〜3文で要約",
       "keyPoints": ["要点1", "要点2", "要点3"],
       "delay": 応答遅延の推定秒数(数値,不明ならnull),
@@ -351,7 +358,7 @@ ${transcript}
   ]
 }`;
 
-const FEEDBACK_PROMPT = (qaList, company, type) => `あなたは10年以上の面接指導経験を持つ就職コーチです。以下の面接Q&Aを5軸で厳密かつ建設的に分析してください。
+const FEEDBACK_PROMPT = (qaList, company, type) => `あなたは10年以上の面接指導経験を持つ就職コーチです。以下の面接Q&Aを、【各質問ごとの個別分析】と【面接全体の総合分析】の両方で徹底的かつ建設的に分析してください。
 
 【面接情報】
 - 会社名: ${company || "(未指定)"}
@@ -360,30 +367,49 @@ const FEEDBACK_PROMPT = (qaList, company, type) => `あなたは10年以上の�
 【Q&Aリスト(JSON)】
 ${JSON.stringify(qaList, null, 2)}
 
-【分析軸】
+【全体分析軸】
 1. 応答速度・流暢性(responseSpeed): 応答遅延、フィラー頻度、テンポ
 2. 回答の適切性・網羅性(appropriateness): 質問への的確さ、具体性、長さ
 3. 一貫性・矛盾検出(consistency): 回答間の論理的整合性、矛盾の有無
 4. 論理的思考力(logicalThinking): PREP法・STAR法の構造、因果関係の明確さ
 5. 総合印象(overall): 熱意・誠実さ、企業研究の深さ
 
+【各質問分析で必ず行うこと】
+- 質問の意図・本質を明示する
+- 回答が質問の意図に答えられているかを評価する
+- 具体性・論理構造（PREP/STAR等）の評価
+- 良かった点と改善点を両方書く
+- 改善した場合の模範回答例を必ず書く
+- スコアは0〜100で辛口に採点する（平均的な回答は50〜60点）
+
 【特に重視する点】
-- 各回答間に矛盾や不整合がないか(横断比較)
+- 各回答間に矛盾や不整合がないか（横断比較）
 - ロジックの飛躍・根拠不足
 - 質問の意図と回答のズレ
 - 抽象的すぎる回答
 
 出力フォーマット(JSONのみ。コードブロック不要):
 {
-  "summary": "面接全体の要約(300〜500字)。志望者がどんな人物で、何をどう語ったかを第三者が読んで掴めるように",
+  "summary": "面接全体の要約(400〜600字)。志望者がどんな人物で、何をどう語ったかを第三者が読んで掴めるように",
   "keyPoints": ["論点1(80字以内)", "論点2(80字以内)", "論点3(80字以内)", "論点4(80字以内)", "論点5(80字以内)"],
   "structure": {
     "topics": [
-      { "topic": "話題テーマ(例:志望動機)", "summary": "そのテーマで何が語られたか(80〜150字)" }
+      { "topic": "話題テーマ(例:志望動機)", "summary": "そのテーマで何が語られたか(100〜200字)" }
     ],
-    "candidateProfile": "志望者像のまとめ(150〜250字)",
+    "candidateProfile": "志望者像のまとめ(200〜300字)",
     "interviewFlow": "面接全体の流れ・進行の特徴(150〜250字)"
   },
+  "perQA": [
+    {
+      "qid": "q-001",
+      "questionIntent": "この質問で面接官が測りたかった意図・本質(50〜100字)",
+      "score": 0〜100の整数,
+      "evaluation": "この回答への総合評価(150〜250字)。質問意図との一致度・具体性・論理構造を含めて",
+      "goodPoints": ["良かった点1(50〜80字)", "良かった点2(任意)"],
+      "improvements": ["改善点1(50〜100字)", "改善点2(任意)"],
+      "modelAnswer": "この質問に対する模範回答例(200〜400字。具体的なエピソードや数字を含めた理想的な回答)"
+    }
+  ],
   "scores": {
     "responseSpeed": 0〜100の整数,
     "appropriateness": 0〜100の整数,
@@ -397,13 +423,13 @@ ${JSON.stringify(qaList, null, 2)}
       "sev": "high|medium|low",
       "qid": "対象質問ID(例:q-001)またはnull",
       "title": "指摘タイトル(15字以内)",
-      "issue": "問題点の具体説明(100〜200字)",
-      "advice": "改善アドバイス(100〜200字)",
-      "eg": "模範回答例(任意。200〜400字または null)"
+      "issue": "問題点の具体説明(150〜250字)",
+      "advice": "改善アドバイス(150〜250字)",
+      "eg": "模範回答例(200〜400字または null)"
     }
   ],
-  "strengths": ["評価できる点1", "評価できる点2", "評価できる点3"],
-  "topPriority": "最優先で改善すべき点(150字以内)"
+  "strengths": ["評価できる点1(具体的に60字以内)", "評価できる点2", "評価できる点3"],
+  "topPriority": "最優先で改善すべき点(200字以内)"
 }`;
 
 // ── Helpers ───────────────────────────────────────────────────────────────
@@ -1108,6 +1134,98 @@ const FeedbackTab = ({ session, feedback, onSave, onExport, saved }) => {
                 <span style={{ fontSize:"14px",color:C.ink,lineHeight:1.7 }}>{s}</span>
               </div>
             ))}
+          </div>
+        </div>
+      )}
+
+      {feedback.perQA && feedback.perQA.length > 0 && (
+        <div>
+          <SectionTitle color={C.ink} label="PER-QUESTION ANALYSIS / 質問別詳細分析"/>
+          <div style={{ display:"flex",flexDirection:"column",gap:"20px" }}>
+            {feedback.perQA.map((pq, i) => {
+              const score = pq.score || 0;
+              const scoreCol = score >= 80 ? C.koke : score >= 60 ? C.amberT : C.shu;
+              // find matching QA
+              const qa = session?.qaList?.find(q => q.id === pq.qid) || session?.qaList?.[i];
+              return (
+                <div key={pq.qid||i} style={{ border:`1px solid ${C.tan2}`, overflow:"hidden" }}>
+                  <div style={{ height:"4px", background: score >= 80 ? C.koke : score >= 60 ? C.amber : C.shu }}/>
+                  <div style={{ padding:"24px" }}>
+                    {/* Header */}
+                    <div style={{ display:"flex", alignItems:"flex-start", justifyContent:"space-between", gap:"16px", marginBottom:"16px", paddingBottom:"16px", borderBottom:`1px solid ${C.tan}` }}>
+                      <div style={{ flex:1 }}>
+                        <div style={{ display:"flex", alignItems:"center", gap:"10px", marginBottom:"8px" }}>
+                          <span style={{ fontSize:"12px", color:C.ink40 }}>Q.{String(i+1).padStart(2,"0")}</span>
+                          {qa && <span style={{ fontSize:"11px", padding:"3px 8px", background:C.ink, color:C.cream }}>{qa.category||"その他"}</span>}
+                        </div>
+                        <p style={{ fontFamily:F.min, fontSize:"1.05rem", color:C.ink, lineHeight:1.75, margin:0 }}>
+                          {qa?.question || pq.qid}
+                        </p>
+                      </div>
+                      <div style={{ textAlign:"center", flexShrink:0 }}>
+                        <div style={{ position:"relative", width:"56px", height:"56px" }}>
+                          <svg width="56" height="56" viewBox="0 0 56 56">
+                            <circle cx="28" cy="28" r="24" fill="none" stroke={C.tan} strokeWidth="4"/>
+                            <circle cx="28" cy="28" r="24" fill="none" stroke={scoreCol} strokeWidth="4"
+                              strokeDasharray={`${2*Math.PI*24*score/100} ${2*Math.PI*24}`}
+                              strokeLinecap="round" transform="rotate(-90 28 28)"/>
+                          </svg>
+                          <span style={{ position:"absolute", inset:0, display:"flex", alignItems:"center", justifyContent:"center",
+                            fontFamily:F.min, fontSize:"14px", fontWeight:500, color:scoreCol }}>{score}</span>
+                        </div>
+                        <span style={{ fontSize:"10px", color:C.ink40 }}>/100</span>
+                      </div>
+                    </div>
+
+                    {/* Question intent */}
+                    {pq.questionIntent && (
+                      <div style={{ marginBottom:"14px", padding:"10px 14px", background:C.tan+"44", borderLeft:`2px solid ${C.ink}` }}>
+                        <span style={{ fontSize:"10px", letterSpacing:"0.2em", color:C.ink60, display:"block", marginBottom:"4px" }}>質問の意図</span>
+                        <p style={{ fontSize:"13px", color:C.ink, margin:0, lineHeight:1.7 }}>{pq.questionIntent}</p>
+                      </div>
+                    )}
+
+                    {/* Evaluation */}
+                    {pq.evaluation && (
+                      <div style={{ marginBottom:"14px" }}>
+                        <span style={{ fontSize:"10px", letterSpacing:"0.2em", color:C.ink60, display:"block", marginBottom:"6px" }}>総合評価</span>
+                        <p style={{ fontSize:"13px", color:C.ink, lineHeight:1.85, margin:0 }}>{pq.evaluation}</p>
+                      </div>
+                    )}
+
+                    <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:"12px", marginBottom:"14px" }}>
+                      {pq.goodPoints?.length > 0 && (
+                        <div style={{ padding:"14px 16px", background:C.koke10, borderLeft:`2px solid ${C.koke}` }}>
+                          <span style={{ fontSize:"10px", letterSpacing:"0.2em", color:C.koke2, display:"block", marginBottom:"8px" }}>良かった点</span>
+                          <ul style={{ margin:0, padding:"0 0 0 16px" }}>
+                            {pq.goodPoints.map((g,j)=>(
+                              <li key={j} style={{ fontSize:"13px", color:C.ink, lineHeight:1.75, marginBottom:"4px" }}>{g}</li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
+                      {pq.improvements?.length > 0 && (
+                        <div style={{ padding:"14px 16px", background:C.shu10, borderLeft:`2px solid ${C.shu}` }}>
+                          <span style={{ fontSize:"10px", letterSpacing:"0.2em", color:C.shu, display:"block", marginBottom:"8px" }}>改善点</span>
+                          <ul style={{ margin:0, padding:"0 0 0 16px" }}>
+                            {pq.improvements.map((imp,j)=>(
+                              <li key={j} style={{ fontSize:"13px", color:C.ink, lineHeight:1.75, marginBottom:"4px" }}>{imp}</li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
+                    </div>
+
+                    {pq.modelAnswer && (
+                      <div style={{ padding:"16px 18px", background:C.paper, borderLeft:`3px solid ${C.shu}` }}>
+                        <span style={{ fontSize:"10px", letterSpacing:"0.2em", color:C.shu, display:"block", marginBottom:"8px" }}>模範回答例</span>
+                        <p style={{ fontFamily:F.min, fontSize:"1rem", color:C.ink, lineHeight:1.95, margin:0, whiteSpace:"pre-wrap" }}>{pq.modelAnswer}</p>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
           </div>
         </div>
       )}
