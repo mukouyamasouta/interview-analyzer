@@ -97,16 +97,17 @@ function startBackgroundKeepalive() {
 }
 
 // ── Retry utility (handles Gemini overload / rate-limit errors) ───────────────
-const RETRYABLE = /high demand|overloaded|quota|rate.?limit|503|429|temporarily/i;
-async function withRetry(fn, { maxRetries=3, onRetry } = {}) {
-  const delays = [5000, 15000, 30000];
+const RETRYABLE = /high demand|overloaded|quota|rate.?limit|503|429|temporarily|unavailable|service\s*error|internal/i;
+async function withRetry(fn, { maxRetries=6, onRetry } = {}) {
+  // 指数バックオフ: 5s → 15s → 30s → 60s → 90s → 120s
+  const delays = [5000, 15000, 30000, 60000, 90000, 120000];
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     try {
       return await fn();
     } catch (e) {
       if (attempt >= maxRetries || !RETRYABLE.test(e.message)) throw e;
-      const wait = delays[attempt] ?? 30000;
-      onRetry?.(attempt + 1, wait);
+      const wait = delays[attempt] ?? 120000;
+      onRetry?.(attempt + 1, maxRetries, wait);
       await new Promise(r => setTimeout(r, wait));
     }
   }
@@ -218,16 +219,18 @@ async function waitForFileActive(apiKey, fileData, { maxWaitMs = 120000, interva
 }
 
 async function geminiAudio({ apiKey, model, file, fileUri, mimeTypeOverride, prompt, maxTokens=65536, onUploadProgress, onRetry }) {
-  const mimeType = mimeTypeOverride || resolvedMime(file);
+  const mimeType = mimeTypeOverride || (file ? resolvedMime(file) : "audio/mpeg");
   const INLINE_LIMIT = 19 * 1024 * 1024;
-
   const generateUrl = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(apiKey)}`;
 
-  let audioPart;
+  // アップロードは一度だけ行い、以降は取得した fileUri を使いまわす。
+  // こうすることで generateContent のリトライ時に再アップロードが走らない。
   let resolvedFileUri = fileUri || null;
+  let audioPart;
 
   if (file && !resolvedFileUri) {
     if (file.size <= INLINE_LIMIT) {
+      // 小さいファイルはインライン base64
       const b64 = await new Promise((res, rej) => {
         const r = new FileReader();
         r.onload = () => res(r.result.split(",")[1]);
@@ -236,6 +239,7 @@ async function geminiAudio({ apiKey, model, file, fileUri, mimeTypeOverride, pro
       });
       audioPart = { inline_data: { mime_type: mimeType, data: b64 } };
     } else {
+      // 大きいファイルは File API へアップロード（一度だけ）
       const uploaded = await uploadToFileAPI(apiKey, file, onUploadProgress);
       resolvedFileUri = uploaded.uri;
       audioPart = { file_data: { mime_type: mimeType, file_uri: resolvedFileUri } };
@@ -244,6 +248,7 @@ async function geminiAudio({ apiKey, model, file, fileUri, mimeTypeOverride, pro
     audioPart = { file_data: { mime_type: mimeType, file_uri: resolvedFileUri } };
   }
 
+  // generateContent だけをリトライ（高負荷時に何度でも再試行）
   return withRetry(async () => {
     const body = {
       contents: [{ parts: [audioPart, { text: prompt }] }],
@@ -604,11 +609,27 @@ const SettingsModal = ({ open, onClose, apiKey, setApiKey, model, setModel }) =>
 // ── Loading Overlay ───────────────────────────────────────────────────────
 const LoadingOverlay = ({ stage, uploadPct, retryInfo }) => {
   const [isHidden, setIsHidden] = useState(false);
+  const [countdown, setCountdown] = useState(null);
+
   useEffect(() => {
     const onVis = () => setIsHidden(document.hidden);
     document.addEventListener('visibilitychange', onVis);
     return () => document.removeEventListener('visibilitychange', onVis);
   }, []);
+
+  // カウントダウンタイマー — retryInfo が来たら秒数を刻む
+  useEffect(() => {
+    if (!retryInfo) { setCountdown(null); return; }
+    const total = Math.round(retryInfo.waitMs / 1000);
+    setCountdown(total);
+    const iv = setInterval(() => {
+      setCountdown(prev => {
+        if (prev === null || prev <= 1) { clearInterval(iv); return 0; }
+        return prev - 1;
+      });
+    }, 1000);
+    return () => clearInterval(iv);
+  }, [retryInfo?.attempt]);
 
   const stages = {
     upload: uploadPct != null ? `音声をアップロード中... ${uploadPct}%` : "音声をアップロード中...",
@@ -618,30 +639,62 @@ const LoadingOverlay = ({ stage, uploadPct, retryInfo }) => {
   };
   return (
     <div style={{ position:"fixed",inset:0,zIndex:40,background:"rgba(245,241,234,0.92)",backdropFilter:"blur(4px)",display:"flex",alignItems:"center",justifyContent:"center",fontFamily:F.sans }}>
-      <div style={{ textAlign:"center",maxWidth:440,padding:"0 24px" }}>
+      <div style={{ textAlign:"center",maxWidth:460,padding:"0 24px" }}>
         <div style={{ position:"relative",width:80,height:80,margin:"0 auto 24px" }}>
           <svg width="80" height="80" viewBox="0 0 80 80" style={{ animation:"spin 2s linear infinite" }}>
             <circle cx="40" cy="40" r="34" fill="none" stroke={C.tan} strokeWidth="3"/>
-            <circle cx="40" cy="40" r="34" fill="none" stroke={C.shu} strokeWidth="3" strokeDasharray="40 200" strokeLinecap="round"/>
+            <circle cx="40" cy="40" r="34" fill="none" stroke={retryInfo?C.amber:C.shu} strokeWidth="3" strokeDasharray="40 200" strokeLinecap="round"/>
             <circle cx="40" cy="40" r="24" fill="none" stroke={C.koke} strokeWidth="2" strokeDasharray="20 100" strokeLinecap="round" transform="rotate(180 40 40)"/>
           </svg>
         </div>
-        <p style={{ fontFamily:F.min,fontSize:"1.1rem",color:C.ink,marginBottom:6 }}>{stages[stage]||"処理中..."}</p>
+
+        <p style={{ fontFamily:F.min,fontSize:"1.1rem",color:C.ink,marginBottom:6 }}>
+          {retryInfo ? "APIが混雑中 — 自動再試行中..." : (stages[stage]||"処理中...")}
+        </p>
+
         {stage === "upload" && uploadPct != null && (
           <div style={{ width:"100%",maxWidth:360,margin:"12px auto 8px",height:6,background:C.tan,borderRadius:3,overflow:"hidden" }}>
             <div style={{ width:`${uploadPct}%`, height:"100%", background:C.shu, transition:"width 0.2s" }}/>
           </div>
         )}
+
         {retryInfo ? (
-          <div style={{ padding:"12px 16px",background:C.amber10,border:`1px solid rgba(193,154,75,0.4)`,marginBottom:16 }}>
-            <p style={{ fontSize:"12px",color:C.amberT,margin:0,lineHeight:1.7 }}>
-              ⚠️ APIが混雑中です。{Math.round(retryInfo.waitMs/1000)}秒待って再試行しています。
-              <br/><span style={{ fontSize:"11px",opacity:0.8 }}>({retryInfo.attempt}/3回目)</span>
+          <div style={{ padding:"16px 20px",background:C.amber10,border:`1px solid rgba(193,154,75,0.5)`,marginBottom:16,textAlign:"left" }}>
+            <p style={{ fontSize:"13px",color:C.amberT,margin:"0 0 10px",fontWeight:600 }}>
+              ⚠️ Gemini APIが一時的に混雑しています
             </p>
+            <p style={{ fontSize:"12px",color:C.ink60,margin:"0 0 12px",lineHeight:1.7 }}>
+              自動的に再試行します。このまましばらくお待ちください。<br/>
+              タブを閉じなければ処理は続きます。
+            </p>
+            <div style={{ display:"flex",alignItems:"center",justifyContent:"space-between",fontSize:"12px" }}>
+              <span style={{ color:C.ink60 }}>
+                {retryInfo.attempt}回目 / 最大{retryInfo.maxRetries}回
+              </span>
+              {countdown !== null && countdown > 0 && (
+                <span style={{ fontFamily:F.min,fontSize:"1.2rem",color:C.amberT,fontWeight:600 }}>
+                  {countdown}秒後に再試行
+                </span>
+              )}
+              {countdown === 0 && (
+                <span style={{ fontSize:"12px",color:C.koke2 }}>再試行中...</span>
+              )}
+            </div>
+            {/* 待機プログレスバー */}
+            {countdown !== null && retryInfo.waitMs > 0 && (
+              <div style={{ marginTop:"10px",height:4,background:C.tan,borderRadius:2,overflow:"hidden" }}>
+                <div style={{
+                  height:"100%", background:C.amber,
+                  width:`${Math.max(0,(1 - countdown / Math.round(retryInfo.waitMs/1000))*100)}%`,
+                  transition:"width 1s linear"
+                }}/>
+              </div>
+            )}
           </div>
         ) : (
           <p style={{ fontSize:"12px",color:C.ink60,marginBottom:16 }}>少々お待ちください</p>
         )}
+
         {isHidden ? (
           <div style={{ padding:"12px 16px",background:C.amber10,border:`1px solid rgba(193,154,75,0.4)` }}>
             <p style={{ fontSize:"12px",color:C.amberT,margin:0,lineHeight:1.7 }}>
@@ -1715,7 +1768,7 @@ export default function App() {
               setUploadPct(pct);
               if (pct >= 95) { setBusy("transcribe"); setUploadPct(null); }
             },
-            onRetry: (attempt, waitMs) => { setBusy("transcribe"); setRetryInfo({ attempt, waitMs }); }
+            onRetry: (attempt, maxR, waitMs) => { setBusy("transcribe"); setRetryInfo({ attempt, maxRetries: maxR, waitMs }); }
           });
           setRetryInfo(null);
           setBusy("transcribe");
@@ -1751,7 +1804,7 @@ export default function App() {
                 ...(fileUri ? { fileUri, mimeTypeOverride: resolvedMime(file) } : { file }),
                 prompt: makeContinuePrompt(lastTime),
                 maxTokens: 65536,
-                onRetry: (attempt, waitMs) => { setBusy("transcribe"); setRetryInfo({ attempt, waitMs }); }
+                onRetry: (attempt, maxR, waitMs) => { setBusy("transcribe"); setRetryInfo({ attempt, maxRetries: maxR, waitMs }); }
               });
             } catch (e) {
               console.warn(`Continuation pass ${pass + 1} failed:`, e.message);
@@ -1800,7 +1853,7 @@ export default function App() {
       try {
         const qaResult = await geminiText({
           apiKey, model, prompt: QA_PROMPT(plainText, company, iType), json: true, maxTokens: 8192,
-          onRetry: (attempt, waitMs) => { setBusy("qa"); setRetryInfo({ attempt, waitMs }); }
+          onRetry: (attempt, maxR, waitMs) => { setBusy("qa"); setRetryInfo({ attempt, maxRetries: maxR, waitMs }); }
         });
         setRetryInfo(null);
         qaList = qaResult?.qaList || [];
@@ -1817,7 +1870,7 @@ export default function App() {
       setBusy("feedback");
       const fbResult = await geminiText({
         apiKey, model, prompt: FEEDBACK_PROMPT(qaList.length > 0 ? qaList : plainText, company, iType), json: true, maxTokens: 16384,
-        onRetry: (attempt, waitMs) => { setBusy("feedback"); setRetryInfo({ attempt, waitMs }); }
+        onRetry: (attempt, maxR, waitMs) => { setBusy("feedback"); setRetryInfo({ attempt, maxRetries: maxR, waitMs }); }
       });
       setRetryInfo(null);
       const fullSession = { sessionId, company, iType, date, transcript, qaList, feedback: fbResult };
