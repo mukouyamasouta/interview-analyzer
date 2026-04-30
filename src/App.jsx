@@ -17,10 +17,12 @@ const C = {
 };
 const F = { min:"'Shippori Mincho B1', serif", sans:"'Noto Sans JP', sans-serif" };
 const MODELS = [
-  { id:"gemini-2.0-flash", label:"Gemini 2.0 Flash", desc:"高速・無料枠が広い（クォータ超過時はこちら）" },
-  { id:"gemini-2.5-flash", label:"Gemini 2.5 Flash", desc:"バランス型・推奨（無料枠: 1分あたり20件）" },
-  { id:"gemini-2.5-pro",   label:"Gemini 2.5 Pro",   desc:"高精度・複雑分析向け（有料プラン推奨）" },
+  { id:"gemini-2.0-flash", label:"Gemini 2.0 Flash", desc:"高速・無料枠が広い ★推奨" },
+  { id:"gemini-2.5-flash", label:"Gemini 2.5 Flash", desc:"高精度（有料プラン向け・無料枠は1分20件）" },
+  { id:"gemini-2.5-pro",   label:"Gemini 2.5 Pro",   desc:"最高精度（有料プラン必須）" },
 ];
+// クォータ超過時のフォールバックモデル順
+const FALLBACK_MODELS = ["gemini-2.0-flash", "gemini-1.5-flash"];
 const SEV = {
   high:  { dot:C.shu,    bg:C.shu10,  textColor:C.shu,    label:"重要" },
   medium:{ dot:C.amber,  bg:C.amber10,textColor:C.amberT, label:"注意" },
@@ -1662,7 +1664,7 @@ export default function App() {
   const [tab, setTab]=useState("input");
   const [settingsOpen, setSettingsOpen]=useState(false);
   const [apiKey, setApiKey]=useState(DEFAULT_API_KEY);
-  const [model, setModel]=useState("gemini-2.5-flash");
+  const [model, setModel]=useState("gemini-2.0-flash");
   const [ready, setReady]=useState(false);
 
   // session state
@@ -1773,7 +1775,33 @@ export default function App() {
       const stopKeepalive = startBackgroundKeepalive();
 
       try {
-      const { mode, file, text, company, iType } = args; // ← 引数を展開
+      const { mode, file, text, company, iType } = args;
+
+      // クォータ超過の場合、フォールバックモデルで自動再試行するラッパー
+      const QUOTA_RE = /quota|free_tier|rate.?limit|429/i;
+      let activeModel = model;
+      const callWithFallback = async (fn) => {
+        try {
+          return await fn(activeModel);
+        } catch (e) {
+          if (QUOTA_RE.test(e.message)) {
+            const fallbacks = FALLBACK_MODELS.filter(m => m !== activeModel);
+            for (const fb of fallbacks) {
+              try {
+                activeModel = fb;
+                setError(`クォータ超過のため ${fb} に切り替えて再試行中...`);
+                const result = await fn(activeModel);
+                setError(""); // 成功したらエラーをクリア
+                return result;
+              } catch (e2) {
+                if (!QUOTA_RE.test(e2.message)) throw e2;
+              }
+            }
+          }
+          throw e;
+        }
+      };
+
       // STEP 1: get transcript
       if (mode === "audio") {
         const INLINE_LIMIT = 19 * 1024 * 1024;
@@ -1785,8 +1813,8 @@ export default function App() {
         }
         try {
           // First transcription pass
-          const pass1 = await geminiAudio({
-            apiKey, model, file,
+          const pass1 = await callWithFallback((m) => geminiAudio({
+            apiKey, model: m, file,
             prompt: TRANSCRIBE_PROMPT,
             maxTokens: 65536,
             onUploadProgress: (pct) => {
@@ -1794,7 +1822,7 @@ export default function App() {
               if (pct >= 95) { setBusy("transcribe"); setUploadPct(null); }
             },
             onRetry: (attempt, maxR, waitMs) => { setBusy("transcribe"); setRetryInfo({ attempt, maxRetries: maxR, waitMs }); }
-          });
+          }));
           setRetryInfo(null);
           setBusy("transcribe");
           transcript = parseTranscriptText(pass1.text);
@@ -1824,13 +1852,13 @@ export default function App() {
             const lastTime = lastEntry.time;
             let nextPass;
             try {
-              nextPass = await geminiAudio({
-                apiKey, model,
+              nextPass = await callWithFallback((m) => geminiAudio({
+                apiKey, model: m,
                 ...(fileUri ? { fileUri, mimeTypeOverride: resolvedMime(file) } : { file }),
                 prompt: makeContinuePrompt(lastTime),
                 maxTokens: 65536,
                 onRetry: (attempt, maxR, waitMs) => { setBusy("transcribe"); setRetryInfo({ attempt, maxRetries: maxR, waitMs }); }
-              });
+              }));
             } catch (e) {
               console.warn(`Continuation pass ${pass + 1} failed:`, e.message);
               break;
@@ -1876,10 +1904,10 @@ export default function App() {
       setBusy("qa");
       let qaList = [];
       try {
-        const qaResult = await geminiText({
-          apiKey, model, prompt: QA_PROMPT(plainText, company, iType), json: true, maxTokens: 8192,
+        const qaResult = await callWithFallback((m) => geminiText({
+          apiKey, model: m, prompt: QA_PROMPT(plainText, company, iType), json: true, maxTokens: 8192,
           onRetry: (attempt, maxR, waitMs) => { setBusy("qa"); setRetryInfo({ attempt, maxRetries: maxR, waitMs }); }
-        });
+        }));
         setRetryInfo(null);
         qaList = qaResult?.qaList || [];
       } catch (e) {
@@ -1893,10 +1921,10 @@ export default function App() {
 
       // STEP 3: feedback
       setBusy("feedback");
-      const fbResult = await geminiText({
-        apiKey, model, prompt: FEEDBACK_PROMPT(qaList.length > 0 ? qaList : plainText, company, iType), json: true, maxTokens: 16384,
+      const fbResult = await callWithFallback((m) => geminiText({
+        apiKey, model: m, prompt: FEEDBACK_PROMPT(qaList.length > 0 ? qaList : plainText, company, iType), json: true, maxTokens: 16384,
         onRetry: (attempt, maxR, waitMs) => { setBusy("feedback"); setRetryInfo({ attempt, maxRetries: maxR, waitMs }); }
-      });
+      }));
       setRetryInfo(null);
       const fullSession = { sessionId, company, iType, date, transcript, qaList, feedback: fbResult };
       setSession(fullSession);
