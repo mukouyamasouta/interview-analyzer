@@ -29,7 +29,7 @@ const SEV = {
 const scoreColor = (s) => s>=80 ? C.koke : s>=70 ? C.amberT : C.shu;
 
 // ── Default API Key ───────────────────────────────────────────────────────
-const DEFAULT_API_KEY = ""; // キーはユーザーが設定画面から入力する
+const DEFAULT_API_KEY = "AIzaSyCnfO2-geRJTfOMXibAjCJ3aSD58DD9Yoo";
 
 const MIME_MAP = {
   m4a: "audio/mp4", mp3: "audio/mpeg", wav: "audio/wav",
@@ -98,9 +98,9 @@ function startBackgroundKeepalive() {
 
 // ── Retry utility (handles Gemini overload / rate-limit errors) ───────────────
 const RETRYABLE = /high demand|overloaded|quota|rate.?limit|503|429|temporarily|unavailable|service\s*error|internal/i;
-async function withRetry(fn, { maxRetries=6, onRetry } = {}) {
-  // 指数バックオフ: 5s → 15s → 30s → 60s → 90s → 120s
-  const delays = [5000, 15000, 30000, 60000, 90000, 120000];
+async function withRetry(fn, { maxRetries=2, onRetry } = {}) {
+  // 指数バックオフ: 10s → 30s
+  const delays = [10000, 30000];
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     try {
       return await fn();
@@ -114,7 +114,7 @@ async function withRetry(fn, { maxRetries=6, onRetry } = {}) {
 }
 
 // ── Gemini API ─────────────────────────────────────────────────────────────
-async function geminiText({ apiKey, model, prompt, json=false, maxTokens=8192, onRetry, maxRetries=6 }) {
+async function geminiText({ apiKey, model, prompt, json=false, maxTokens=8192, onRetry, maxRetries=2 }) {
   return withRetry(async () => {
     const url=`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(apiKey)}`;
     const body = {
@@ -1687,7 +1687,10 @@ export default function App() {
       try{
         const r=await window.storage.get("gemini_api_key");
         if(r?.value) setApiKey(r.value);
-        // ストレージにキーがない場合は何も書き込まない（ユーザーに設定してもらう）
+        else {
+          setApiKey(DEFAULT_API_KEY);
+          await window.storage.set("gemini_api_key", DEFAULT_API_KEY);
+        }
       }catch{}
       try{ const r=await window.storage.get("gemini_model"); if(r?.value) setModel(r.value); }catch{}
 
