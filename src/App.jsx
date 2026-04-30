@@ -32,7 +32,7 @@ const SEV = {
 const scoreColor = (s) => s>=80 ? C.koke : s>=70 ? C.amberT : C.shu;
 
 // ── Default API Key ───────────────────────────────────────────────────────
-const DEFAULT_API_KEY = "AIzaSyC4JjYMa_7YK6MQFfmy-ZTSXQvhaIJ8qDc";
+const DEFAULT_API_KEY = "AIzaSyBj2txoixD6XAHmruzneXAHyGr8YW4se8g";
 
 const MIME_MAP = {
   m4a: "audio/mp4", mp3: "audio/mpeg", wav: "audio/wav",
@@ -1690,7 +1690,7 @@ export default function App() {
       try{
         const r=await window.storage.get("gemini_api_key");
         // 保存済みキーがデフォルトと異なる古いキーなら上書きする
-        const OLD_KEYS = ["AIzaSyAglc7JmXn5w4OWT3dpGoLWsVwXy6dRx18","AIzaSyCvUICumci2996nOitqxXzvGxyc7soFVAU","AIzaSyCnfO2-geRJTfOMXibAjCJ3aSD58DD9Yoo"];
+        const OLD_KEYS = ["AIzaSyAglc7JmXn5w4OWT3dpGoLWsVwXy6dRx18","AIzaSyCvUICumci2996nOitqxXzvGxyc7soFVAU","AIzaSyCnfO2-geRJTfOMXibAjCJ3aSD58DD9Yoo","AIzaSyC4JjYMa_7YK6MQFfmy-ZTSXQvhaIJ8qDc"];
         if(r?.value && !OLD_KEYS.includes(r.value)){
           setApiKey(r.value); // ユーザーが手動で設定したキーはそのまま使う
         } else {
