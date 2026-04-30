@@ -17,6 +17,7 @@ const C = {
 };
 const F = { min:"'Shippori Mincho B1', serif", sans:"'Noto Sans JP', sans-serif" };
 const MODELS = [
+  { id:"gemini-1.5-flash", label:"Gemini 1.5 Flash", desc:"軽量・無料枠が最も広い" },
   { id:"gemini-2.0-flash", label:"Gemini 2.0 Flash", desc:"高速・無料枠が広い ★推奨" },
   { id:"gemini-2.5-flash", label:"Gemini 2.5 Flash", desc:"高精度（有料プラン向け・無料枠は1分20件）" },
   { id:"gemini-2.5-pro",   label:"Gemini 2.5 Pro",   desc:"最高精度（有料プラン必須）" },
