@@ -38,6 +38,7 @@ const MIME_MAP = {
   m4a: "audio/mp4", mp3: "audio/mpeg", wav: "audio/wav",
   ogg: "audio/ogg", flac: "audio/flac", aac: "audio/aac",
   mp4: "video/mp4", webm: "video/webm", mov: "video/quicktime",
+  qta: "audio/mpeg",
 };
 function resolvedMime(file) {
   if (file.type && file.type !== "application/octet-stream") return file.type;
@@ -899,7 +900,7 @@ const InputTab = ({ onAnalyze, hasKey, onOpenSettings, busy }) => {
               background: file?C.koke10:dragOver?C.shu10:"transparent"
             }}>
             <input ref={fileRef} type="file"
-              accept="audio/*,video/*,.m4a,.mp3,.wav,.aac,.flac,.ogg,.mp4,.webm,.mov"
+              accept="audio/*,video/*,.m4a,.mp3,.wav,.aac,.flac,.ogg,.mp4,.webm,.mov,.qta"
               onChange={handleFile} style={{ display:"none" }}/>
             <div style={{ width:"64px",height:"64px",display:"flex",alignItems:"center",justifyContent:"center",background:file?C.koke:dragOver?C.shu:C.tan,borderRadius:"50%",marginBottom:"20px" }}>
               {file ? <CheckCircle2 size={28} strokeWidth={1.5} style={{ color:C.cream }}/>
