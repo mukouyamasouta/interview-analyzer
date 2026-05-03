@@ -790,7 +790,7 @@ const InputTab = ({ onAnalyze, hasKey, onOpenSettings, busy }) => {
   const validateAndSet = (f) => {
     if (!f) return;
     const ext = f.name.split(".").pop().toLowerCase();
-    const allowed = ["mp3","wav","m4a","mp4","ogg","flac","aac","webm","mov"];
+    const allowed = ["mp3","wav","m4a","mp4","ogg","flac","aac","webm","mov","qta"];
     if (!allowed.includes(ext)) {
       setError(`「.${ext}」は対応していません。MP3 / WAV / M4A / MP4 などをお使いください。`);
       return;
@@ -919,7 +919,7 @@ const InputTab = ({ onAnalyze, hasKey, onOpenSettings, busy }) => {
                 </>
               : <>
                   <p style={{ fontFamily:F.min,fontSize:"1.1rem",color:C.ink,marginBottom:"6px",marginTop:0 }}>クリックまたはドラッグ＆ドロップ</p>
-                  <p style={{ fontSize:"12px",color:C.ink40,margin:0 }}>MP3 / WAV / <strong style={{color:C.koke2}}>M4A</strong> / MP4 — 最大600MB / 約40〜60分</p>
+                  <p style={{ fontSize:"12px",color:C.ink40,margin:0 }}>MP3 / WAV / <strong style={{color:C.koke2}}>M4A</strong> / MP4 / QTA — 最大600MB / 約40〜60分</p>
                 </>
             }
           </div>
