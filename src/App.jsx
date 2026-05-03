@@ -23,7 +23,7 @@ const MODELS = [
   { id:"gemini-2.5-pro",   label:"Gemini 2.5 Pro",   desc:"最高精度（有料プラン必須）" },
 ];
 // クォータ超過時のフォールバックモデル順
-const FALLBACK_MODELS = ["gemini-2.0-flash", "gemini-1.5-flash"];
+const FALLBACK_MODELS = ["gemini-2.5-flash"];
 const SEV = {
   high:  { dot:C.shu,    bg:C.shu10,  textColor:C.shu,    label:"重要" },
   medium:{ dot:C.amber,  bg:C.amber10,textColor:C.amberT, label:"注意" },
@@ -32,7 +32,7 @@ const SEV = {
 const scoreColor = (s) => s>=80 ? C.koke : s>=70 ? C.amberT : C.shu;
 
 // ── Default API Key ───────────────────────────────────────────────────────
-const DEFAULT_API_KEY = "AIzaSyBj2txoixD6XAHmruzneXAHyGr8YW4se8g";
+const DEFAULT_API_KEY = "AIzaSyBFbJZchlnWoF5aAhwinetQ5XRyyd8h0Kw";
 
 const MIME_MAP = {
   m4a: "audio/mp4", mp3: "audio/mpeg", wav: "audio/wav",
@@ -497,40 +497,35 @@ const TabBtn = ({ active, onClick, Icon, label, num, disabled }) => (
 );
 
 // ── Settings Modal ────────────────────────────────────────────────────────
-const SettingsModal = ({ open, onClose, apiKey, setApiKey, model, setModel }) => {
-  const [tmp, setTmp]=useState(apiKey);
+const SettingsModal = ({ open, onClose, model, setModel }) => {
   const [tmpM, setTmpM]=useState(model);
-  const [show, setShow]=useState(false);
   const [st, setSt]=useState("idle");
   const [msg, setMsg]=useState(""); const [resT, setResT]=useState("");
 
-  useEffect(()=>{ if(open){setTmp(apiKey);setTmpM(model);setSt("idle");setMsg("");setResT("");} },[open]);
+  useEffect(()=>{ if(open){setTmpM(model);setSt("idle");setMsg("");setResT("");} },[open]);
 
   const test=async()=>{
-    if(!tmp.trim()){setSt("error");setMsg("APIキーを入力してください");return;}
     setSt("testing"); setMsg(""); setResT("");
     try {
       const r=await geminiText({
-        apiKey:tmp.trim(), model:tmpM,
+        apiKey:DEFAULT_API_KEY, model:tmpM,
         prompt:"「接続テスト成功」と一言だけ返してください。",
         maxTokens:50,
-        // テストではリトライしない（すぐにエラー内容を見せる）
         maxRetries:0,
       });
       setSt("success"); setResT(r.trim()); setMsg("接続に成功しました");
     } catch(e){
       setSt("error");
-      // エラー内容を分かりやすく日本語に変換
       const raw = e.message || "";
       let hint = "";
       if (/API_KEY_INVALID|invalid.*key|api key not valid/i.test(raw)) {
-        hint = "APIキーが無効です。Google AI StudioでAPIキーを確認してください。";
+        hint = "APIキーが無効です。";
       } else if (/PERMISSION_DENIED|permission denied/i.test(raw)) {
-        hint = "APIキーの権限がありません。Gemini APIが有効になっているか確認してください。";
+        hint = "APIキーの権限がありません。";
       } else if (/quota|rate.?limit|429|free_tier/i.test(raw)) {
-        hint = `無料枠の上限に達しています。\n① 設定で「Gemini 2.0 Flash」に切り替えてお試しください。\n② または Google AI Studio (aistudio.google.com) でPay-as-you-goプランを有効にしてください。`;
+        hint = `無料枠の上限に達しています。別のモデルをお試しください。`;
       } else if (/model.*not.*found|not.*supported/i.test(raw)) {
-        hint = `選択中のモデル「${tmpM}」がこのAPIキーで使用できません。別のモデルをお試しください。`;
+        hint = `選択中のモデル「${tmpM}」が使用できません。別のモデルをお試しください。`;
       } else if (/network|fetch|failed to fetch/i.test(raw)) {
         hint = "ネットワークエラーです。インターネット接続を確認してください。";
       }
@@ -538,8 +533,8 @@ const SettingsModal = ({ open, onClose, apiKey, setApiKey, model, setModel }) =>
     }
   };
   const save=async()=>{
-    setApiKey(tmp.trim()); setModel(tmpM);
-    try{await window.storage.set("gemini_api_key",tmp.trim());await window.storage.set("gemini_model",tmpM);}catch{}
+    setModel(tmpM);
+    try{await window.storage.set("gemini_model",tmpM);}catch{}
     onClose();
   };
   if(!open) return null;
@@ -552,31 +547,11 @@ const SettingsModal = ({ open, onClose, apiKey, setApiKey, model, setModel }) =>
         <div style={{ display:"flex",alignItems:"center",justifyContent:"space-between",padding:"20px 28px",borderBottom:`1px solid ${C.tan2}` }}>
           <div>
             <p style={{ fontSize:"11px",letterSpacing:"0.3em",color:C.shu,marginBottom:"4px" }}>SETTINGS</p>
-            <h3 style={{ fontFamily:F.min,fontSize:"1.25rem",color:C.ink,margin:0 }}>API設定</h3>
+            <h3 style={{ fontFamily:F.min,fontSize:"1.25rem",color:C.ink,margin:0 }}>モデル設定</h3>
           </div>
           <button onClick={onClose} style={{ padding:"8px",color:C.ink60,background:"none",border:"none",cursor:"pointer" }}><X size={18} strokeWidth={1.5}/></button>
         </div>
         <div style={{ padding:"24px 28px",display:"flex",flexDirection:"column",gap:"24px" }}>
-          <div style={{ padding:"14px 16px",display:"flex",gap:"12px",background:C.koke10,borderLeft:`3px solid ${C.koke}` }}>
-            <ShieldCheck size={18} strokeWidth={1.5} style={{ color:C.koke,flexShrink:0,marginTop:"2px" }}/>
-            <p style={{ fontSize:"12px",color:C.ink,lineHeight:1.7,margin:0 }}>
-              APIキーはブラウザにのみ保存されます。<span style={{ color:C.shu }}>Google AI Studio</span> から取得できます。
-            </p>
-          </div>
-          <div>
-            <label style={{ display:"flex",alignItems:"center",gap:"6px",fontSize:"11px",letterSpacing:"0.25em",color:C.ink60,marginBottom:"8px" }}>
-              <Key size={12} strokeWidth={1.5}/> GEMINI API KEY
-            </label>
-            <div style={{ position:"relative" }}>
-              <input type={show?"text":"password"} value={tmp} onChange={e=>setTmp(e.target.value)} placeholder="AIza..."
-                style={{ width:"100%",boxSizing:"border-box",padding:"12px 48px 12px 16px",fontSize:"13px",letterSpacing:"0.05em",
-                  background:"transparent",border:`1px solid ${C.tan2}`,color:C.ink,outline:"none",fontFamily:F.sans }}
-                onFocus={e=>e.target.style.borderColor=C.shu} onBlur={e=>e.target.style.borderColor=C.tan2}/>
-              <button onClick={()=>setShow(!show)} style={{ position:"absolute",right:"12px",top:"50%",transform:"translateY(-50%)",background:"none",border:"none",color:C.ink60,cursor:"pointer" }}>
-                {show?<EyeOff size={14}/>:<Eye size={14}/>}
-              </button>
-            </div>
-          </div>
           <div>
             <label style={{ display:"flex",alignItems:"center",gap:"6px",fontSize:"11px",letterSpacing:"0.25em",color:C.ink60,marginBottom:"12px" }}>
               <Zap size={12} strokeWidth={1.5}/> MODEL
@@ -623,8 +598,8 @@ const SettingsModal = ({ open, onClose, apiKey, setApiKey, model, setModel }) =>
         </div>
         <div style={{ display:"flex",justifyContent:"flex-end",gap:"8px",padding:"16px 28px",borderTop:`1px solid ${C.tan2}`,background:C.paper }}>
           <button onClick={onClose} style={{ padding:"10px 20px",fontSize:"13px",color:C.ink60,background:"none",border:"none",cursor:"pointer" }}>キャンセル</button>
-          <button onClick={save} disabled={!tmp.trim()}
-            style={{ padding:"10px 24px",fontSize:"13px",background:C.shu,color:C.cream,border:"none",cursor:"pointer",transition:"background 0.2s",opacity:tmp.trim()?1:0.3,fontFamily:F.sans }}
+          <button onClick={save}
+            style={{ padding:"10px 24px",fontSize:"13px",background:C.shu,color:C.cream,border:"none",cursor:"pointer",transition:"background 0.2s",fontFamily:F.sans }}
             onMouseEnter={e=>e.currentTarget.style.background=C.shu2} onMouseLeave={e=>e.currentTarget.style.background=C.shu}
           >保存</button>
         </div>
@@ -1665,7 +1640,7 @@ export default function App() {
   const [tab, setTab]=useState("input");
   const [settingsOpen, setSettingsOpen]=useState(false);
   const [apiKey, setApiKey]=useState(DEFAULT_API_KEY);
-  const [model, setModel]=useState("gemini-2.0-flash");
+  const [model, setModel]=useState("gemini-2.5-flash");
   const [ready, setReady]=useState(false);
 
   // session state
@@ -1690,13 +1665,8 @@ export default function App() {
       try{
         const r=await window.storage.get("gemini_api_key");
         // 保存済みキーがデフォルトと異なる古いキーなら上書きする
-        const OLD_KEYS = ["AIzaSyAglc7JmXn5w4OWT3dpGoLWsVwXy6dRx18","AIzaSyCvUICumci2996nOitqxXzvGxyc7soFVAU","AIzaSyCnfO2-geRJTfOMXibAjCJ3aSD58DD9Yoo","AIzaSyC4JjYMa_7YK6MQFfmy-ZTSXQvhaIJ8qDc"];
-        if(r?.value && !OLD_KEYS.includes(r.value)){
-          setApiKey(r.value); // ユーザーが手動で設定したキーはそのまま使う
-        } else {
-          setApiKey(DEFAULT_API_KEY);
-          await window.storage.set("gemini_api_key", DEFAULT_API_KEY);
-        }
+        setApiKey(DEFAULT_API_KEY);
+        await window.storage.set("gemini_api_key", DEFAULT_API_KEY);
       }catch{}
       try{ const r=await window.storage.get("gemini_model"); if(r?.value) setModel(r.value); }catch{}
 
@@ -2120,7 +2090,7 @@ export default function App() {
       {busy && <LoadingOverlay stage={busy} uploadPct={uploadPct} retryInfo={retryInfo}/>}
 
       <SettingsModal open={settingsOpen} onClose={()=>setSettingsOpen(false)}
-        apiKey={apiKey} setApiKey={setApiKey} model={model} setModel={setModel}/>
+        model={model} setModel={setModel}/>
     </div>
   );
 }
