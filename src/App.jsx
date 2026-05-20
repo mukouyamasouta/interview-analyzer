@@ -505,18 +505,20 @@ const TabBtn = ({ active, onClick, Icon, label, num, disabled }) => (
 );
 
 // ── Settings Modal ────────────────────────────────────────────────────────
-const SettingsModal = ({ open, onClose, model, setModel }) => {
+const SettingsModal = ({ open, onClose, model, setModel, apiKey, setApiKey }) => {
   const [tmpM, setTmpM]=useState(model);
+  const [tmpKey, setTmpKey]=useState(apiKey);
+  const [showKey, setShowKey]=useState(false);
   const [st, setSt]=useState("idle");
   const [msg, setMsg]=useState(""); const [resT, setResT]=useState("");
 
-  useEffect(()=>{ if(open){setTmpM(model);setSt("idle");setMsg("");setResT("");} },[open]);
+  useEffect(()=>{ if(open){setTmpM(model);setTmpKey(apiKey);setSt("idle");setMsg("");setResT("");} },[open]);
 
   const test=async()=>{
     setSt("testing"); setMsg(""); setResT("");
     try {
       const r=await geminiText({
-        apiKey:DEFAULT_API_KEY, model:tmpM,
+        apiKey:tmpKey||DEFAULT_API_KEY, model:tmpM,
         prompt:"「接続テスト成功」と一言だけ返してください。",
         maxTokens:50,
         maxRetries:0,
@@ -542,7 +544,10 @@ const SettingsModal = ({ open, onClose, model, setModel }) => {
   };
   const save=async()=>{
     setModel(tmpM);
+    const keyToSave = tmpKey.trim() || DEFAULT_API_KEY;
+    setApiKey(keyToSave);
     try{await window.storage.set("gemini_model",tmpM);}catch{}
+    try{await window.storage.set("gemini_api_key",keyToSave);}catch{}
     onClose();
   };
   if(!open) return null;
@@ -555,11 +560,33 @@ const SettingsModal = ({ open, onClose, model, setModel }) => {
         <div style={{ display:"flex",alignItems:"center",justifyContent:"space-between",padding:"20px 28px",borderBottom:`1px solid ${C.tan2}` }}>
           <div>
             <p style={{ fontSize:"11px",letterSpacing:"0.3em",color:C.shu,marginBottom:"4px" }}>SETTINGS</p>
-            <h3 style={{ fontFamily:F.min,fontSize:"1.25rem",color:C.ink,margin:0 }}>モデル設定</h3>
+            <h3 style={{ fontFamily:F.min,fontSize:"1.25rem",color:C.ink,margin:0 }}>設定</h3>
           </div>
           <button onClick={onClose} style={{ padding:"8px",color:C.ink60,background:"none",border:"none",cursor:"pointer" }}><X size={18} strokeWidth={1.5}/></button>
         </div>
         <div style={{ padding:"24px 28px",display:"flex",flexDirection:"column",gap:"24px" }}>
+          <div>
+            <label style={{ display:"flex",alignItems:"center",gap:"6px",fontSize:"11px",letterSpacing:"0.25em",color:C.ink60,marginBottom:"12px" }}>
+              <Key size={12} strokeWidth={1.5}/> API KEY
+            </label>
+            <div style={{ position:"relative" }}>
+              <input
+                type={showKey?"text":"password"}
+                value={tmpKey}
+                onChange={e=>setTmpKey(e.target.value)}
+                placeholder="Gemini APIキーを入力（空欄でデフォルト使用）"
+                style={{ width:"100%",padding:"10px 40px 10px 12px",fontSize:"13px",fontFamily:F.sans,
+                  border:`1px solid ${C.tan2}`,background:C.paper,color:C.ink,outline:"none",boxSizing:"border-box" }}
+              />
+              <button onClick={()=>setShowKey(v=>!v)} style={{ position:"absolute",right:"10px",top:"50%",transform:"translateY(-50%)",
+                background:"none",border:"none",cursor:"pointer",color:C.ink60,padding:"2px" }}>
+                {showKey?<EyeOff size={15} strokeWidth={1.5}/>:<Eye size={15} strokeWidth={1.5}/>}
+              </button>
+            </div>
+            <p style={{ fontSize:"11px",color:C.ink40,marginTop:"6px",marginBottom:0 }}>
+              空欄のままにすると組み込みのAPIキーを使用します
+            </p>
+          </div>
           <div>
             <label style={{ display:"flex",alignItems:"center",gap:"6px",fontSize:"11px",letterSpacing:"0.25em",color:C.ink60,marginBottom:"12px" }}>
               <Zap size={12} strokeWidth={1.5}/> MODEL
@@ -1672,9 +1699,7 @@ export default function App() {
     (async()=>{
       try{
         const r=await window.storage.get("gemini_api_key");
-        // 保存済みキーがデフォルトと異なる古いキーなら上書きする
-        setApiKey(DEFAULT_API_KEY);
-        await window.storage.set("gemini_api_key", DEFAULT_API_KEY);
+        if(r?.value) setApiKey(r.value);
       }catch{}
       try{ const r=await window.storage.get("gemini_model"); if(r?.value) setModel(r.value); }catch{}
 
@@ -2098,7 +2123,7 @@ export default function App() {
       {busy && <LoadingOverlay stage={busy} uploadPct={uploadPct} retryInfo={retryInfo}/>}
 
       <SettingsModal open={settingsOpen} onClose={()=>setSettingsOpen(false)}
-        model={model} setModel={setModel}/>
+        model={model} setModel={setModel} apiKey={apiKey} setApiKey={setApiKey}/>
     </div>
   );
 }
